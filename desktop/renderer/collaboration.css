@@ -1,0 +1,42 @@
+.button-line { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.collab { max-width: 1080px; }
+.collab h3 { margin: 22px 0 10px; font-size: 14px; }
+.login-panel { max-width: 500px; }
+.login-panel h2 { margin-top: 0; }
+.login-panel > p:last-child { margin: 18px 0 0; }
+.endpoint { overflow-wrap: anywhere; color: #586887; }
+.collab-form { margin: 16px 0; display: grid; gap: 9px; align-items: start; }
+.collab-form label, .issued-code label { color: #485571; font-size: 14px; font-weight: 600; }
+.collab-form input, .issued-code input {
+  width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid #d3dcec;
+  border-radius: 7px; color: #26324a; background: white;
+}
+.collab-form > button { justify-self: start; }
+.collab-form input[type="number"] { width: 90px; }
+.identity-line { justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.identity-line span, .member-list small { color: #65748e; }
+.project-grid { display: grid; grid-template-columns: minmax(240px, 0.75fr) minmax(320px, 1.25fr); gap: 18px; align-items: start; }
+.project-grid .panel { min-width: 0; padding: 20px; }
+.project-title { display: flex; justify-content: space-between; align-items: start; gap: 10px; }
+.project-title h2 { margin: 0; overflow-wrap: anywhere; font-size: 20px; }
+.project-title .badge { flex-shrink: 0; }
+.project-choice {
+  width: 100%; margin-bottom: 7px; display: flex; align-items: center;
+  justify-content: space-between; gap: 10px; text-align: left;
+}
+.project-choice span { overflow-wrap: anywhere; }
+.project-choice small { flex-shrink: 0; }
+.project-choice.current-project { background: #edf0ff; color: #3f53b8; border-color: #c9d3fb; font-weight: 600; }
+.member-list { padding: 0; margin: 0; list-style: none; }
+.member-list li {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 9px 0; border-bottom: 1px solid #edf0f6; overflow-wrap: anywhere;
+}
+.member-list li > :last-child { flex-shrink: 0; }
+.member-list small { display: block; margin-top: 4px; }
+.issued-code { background: #f4f6fd; padding: 13px; border-radius: 7px; }
+.issued-code input { margin-top: 7px; font-family: Consolas, monospace; }
+.issued-code p, .task-placeholder { font-size: 13px; color: #52617a; margin-bottom: 0; }
+@media (max-width: 1000px) {
+  .project-grid { grid-template-columns: 1fr; }
+}

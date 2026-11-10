@@ -1,0 +1,20 @@
+server:
+  address: ${TCW_BIND_ADDRESS:127.0.0.1}
+  port: ${TCW_PORT:8080}
+  error:
+    include-message: never
+    include-stacktrace: never
+spring:
+  application:
+    name: tcw-server
+  datasource:
+    url: ${TCW_DB_URL:jdbc:mysql://127.0.0.1:3306/tcw?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: ${TCW_DB_USER:tcw_app}
+    password: ${TCW_DB_PASSWORD}
+    hikari:
+      connection-timeout: 5000
+      maximum-pool-size: 8
+  flyway:
+    enabled: true
+  mvc:
+    log-request-details: false
