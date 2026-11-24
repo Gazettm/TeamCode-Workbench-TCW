@@ -25,6 +25,13 @@ async function exerciseProjects() {
     if (button.disabled) throw new Error('Disabled button ' + text);
     button.click();
   };
+  const openView = async id => {
+    const button = () => document.querySelector('#project-' + id + '-view');
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    await wait(()=>button() && !button().disabled, 'project view available ' + id);
+    button().click();
+    await wait(()=>button()?.getAttribute('aria-pressed')==='true', 'project view active ' + id);
+  };
   const suffix = crypto.randomUUID().slice(0, 12);
   const pass = crypto.randomUUID();
   const offline = (await window.tcw.bootstrap()).data;
@@ -54,12 +61,15 @@ async function exerciseProjects() {
   }
   const forbidden = await window.tcw.list(offline.scope, offline.workspaces[0].id, '');
   if (forbidden.ok || forbidden.code !== 'SCOPE_CHANGED') throw new Error('Old workspace scope was accepted');
+  document.querySelector('#show-create-project').click();
+  await wait(()=>document.querySelector('#new-project'),'project form');
   set('#new-project', projectName);
   await new Promise(resolve => setTimeout(resolve, 20));
   press('.project-list button','创建项目');
   await wait(() => document.querySelector('.project-title h2')?.textContent === projectName
-      && document.querySelector('.project-detail .member-list')?.textContent.includes('联调组长')
       && !document.querySelector('.identity-line button')?.disabled, 'create project');
+  document.querySelector('#show-create-project').click();
+  await wait(()=>document.querySelector('#new-project'),'second project form');
   set('#new-project', projectName + ' 二');
   await new Promise(resolve => setTimeout(resolve, 20));
   press('.project-list button','创建项目');
@@ -68,24 +78,31 @@ async function exerciseProjects() {
   [...document.querySelectorAll('.project-choice')].find(button => button.firstElementChild.textContent === projectName).click();
   await wait(() => document.querySelector('.project-title h2')?.textContent === projectName
       && !document.querySelector('.identity-line button')?.disabled, 'switch to first project');
+  await openView('members');
+  await wait(()=>document.querySelector('#invite-hours'),'member view');
   press('.project-detail button','生成邀请码');
   await wait(() => document.querySelector('#issued-code')?.value
       && !document.querySelector('.identity-line button')?.disabled, 'issue invitation');
   const code = document.querySelector('#issued-code').value;
-  press('.page-heading button','退出登录');
+  press('.identity-line button','退出登录');
   await wait(() => document.querySelector('.login-panel'), 'logout owner');
   const after = (await window.tcw.bootstrap()).data;
   if (after.scope !== offline.scope || !Object.values(after.notes)[0]?.['README.md']) throw new Error('Offline note did not return');
   await registerLogin('desktop_b_' + suffix, '联调组员');
+  document.querySelector('#show-join-project').click();
+  await wait(()=>document.querySelector('#join-code'),'invite form');
   set('#join-code', code);
   await new Promise(resolve => setTimeout(resolve, 20));
   press('.project-list button','加入项目');
+  await wait(()=>document.querySelector('.project-title h2')?.textContent===projectName
+    && !document.querySelector('#project-members-view').disabled,'joined project');
+  await openView('members');
   await wait(() => document.querySelector('.project-detail .member-list')?.textContent.includes('联调组长')
       && document.querySelector('.project-detail .member-list')?.textContent.includes('联调组员')
       && !document.querySelector('.identity-line button')?.disabled, 'join and list roster');
   if (document.querySelector('#invite-hours')) throw new Error('Member can see owner invitation controls');
   const reviewer = (await window.tcw.bootstrap()).data.user;
-  press('.page-heading button','退出登录');
+  press('.identity-line button','退出登录');
   await wait(() => document.querySelector('.login-panel'), 'logout member');
   await login('desktop_a_' + suffix, '联调组长');
   const projectChoice = () => [...document.querySelectorAll('.project-choice')].find(button => button.firstElementChild.textContent === projectName);
@@ -94,24 +111,28 @@ async function exerciseProjects() {
   window.confirm=()=>true;
   await wait(() => document.querySelector('.project-title h2')?.textContent===projectName && !document.querySelector('.identity-line button')?.disabled, 'owner project');
   press('.sidebar .nav','▦ 本地工作区');
-  await wait(() => document.querySelector('#clone-url'), 'signed-in local workspace');
-  press('.page-heading button','＋ 导入 Git 仓库');
+  await wait(() => document.querySelector('.workspace-header'), 'signed-in local workspace');
+  press('.workspace-header button','＋ 导入 Git 仓库');
   await wait(() => document.querySelector('.workspace-bar select')?.options.length===2 && !document.querySelector('.workspace-bar select').disabled, 'import into signed-in workspace');
   press('.sidebar .nav','◷ 协作项目');
   await wait(() => projectChoice() && !projectChoice().disabled, 'open project again');
   if (!projectChoice().classList.contains('current-project')) projectChoice().click();
   await wait(() => document.querySelector('.project-title h2')?.textContent===projectName
-    && document.querySelector('#project-repo')?.options.length===2 && !document.querySelector('#project-repo').disabled, 'project repository selector');
+    && !document.querySelector('#project-members-view').disabled, 'member view ready');
+  await openView('members');
+  await wait(() => document.querySelector('#project-repo')?.options.length===2 && !document.querySelector('#project-repo').disabled, 'project repository selector');
   const projectRepo=document.querySelector('#project-repo');
   projectRepo.value=projectRepo.options[1].value;
   projectRepo.dispatchEvent(new Event('change',{bubbles:true}));
   await wait(() => projectRepo.value && !projectRepo.disabled, 'bind project repository');
+  await openView('tasks');
+  await wait(()=>document.querySelector('#show-create-task') && !document.querySelector('#show-create-task').disabled,'task view');
+  document.querySelector('#show-create-task').click();
   const taskReady = status => document.querySelector('.task-detail .badge')?.textContent===status && !document.querySelector('.task-area .task-heading button').disabled;
   const taskButton = label => [...document.querySelectorAll('.task-detail button')].find(button => button.textContent.trim() === label);
   await wait(()=>document.querySelector('.project-title h2')?.textContent===projectName
-    && document.querySelector('.project-detail .member-list')?.textContent.includes('联调组员')
     && document.querySelector('.task-create button') && !document.querySelector('.task-create button').disabled,'task board and roster');
-  set('#task-title','0.4 桌面验收闭环');
+  set('#task-title','0.4.2 桌面验收闭环');
   const selectAssignee=document.querySelector('.task-fields select');
   if (![...selectAssignee.options].some(option => option.value===signedIn.user.id)) throw new Error('Owner missing from the assignee list');
   selectAssignee.value=signedIn.user.id;selectAssignee.dispatchEvent(new Event('change',{bubbles:true}));
@@ -142,7 +163,18 @@ async function exerciseProjects() {
   await wait(()=>taskReady('待验收') && taskButton('验收通过') && !taskButton('验收通过').disabled,'revoke and unlock');
   press('.task-detail button','验收通过');
   await wait(()=>taskReady('已完成'),'accept task');
-  return { accountScope: true, ownerCreated: true, projectSwitch: true, memberJoined: true, taskLifecycle:true, reviewDelegation:true, taskBranch:true };
+  const filter=document.querySelector('#task-status-filter');
+  filter.value='OPEN';
+  filter.dispatchEvent(new Event('change',{bubbles:true}));
+  await wait(()=>!document.querySelector('.task-card'),'task filter');
+  filter.value='DONE';
+  filter.dispatchEvent(new Event('change',{bubbles:true}));
+  await wait(()=>document.querySelector('.task-card')?.textContent.includes('0.4.2 桌面验收闭环'),'show completed task');
+  await openView('activity');
+  await wait(()=>document.querySelector('.activity-list')?.textContent.includes('验收通过'),'activity view');
+  await openView('tasks');
+  await wait(()=>taskReady('已完成'),'return to task details');
+  return { accountScope: true, ownerCreated: true, projectSwitch: true, memberJoined: true, taskLifecycle:true, reviewDelegation:true, taskBranch:true, taskFilter:true, projectTabs:true };
 }
 
 async function runProjectSmoke(window) {
