@@ -1,0 +1,129 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const os = require('node:os');
+const { execFileSync } = require('node:child_process');
+const { Store, Workbench } = require('../desktop/core.cjs');
+const { randomUUID } = require('node:crypto');
+const { operate, githubAddress, cloneGithub } = require('../desktop/git.cjs');
+
+const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true }).trim();
+const read = root => operate(root, 'read');
+const write = async (root, action, input = {}, confirm = () => true) =>
+  operate(root, action, { ...await read(root), ...input }, confirm);
+
+test('选择提交、保留无关暂存，分支切换和远程更新遵守安全条件', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tcw-git-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 3 }));
+  await fs.mkdir(path.join(dir, 'work'));
+  const root = await fs.realpath(path.join(dir, 'work'));
+  const file = (name, content) => fs.writeFile(path.join(root, name), content);
+  git(dir, 'init', '--bare', '-b', 'main', 'remote.git');
+  git(root, 'init', '-b', 'main');
+  await write(root, 'author', { name: '测试作者', email: 'tcw@example.test' });
+  assert.deepEqual((await read(root)).author, { name: '测试作者', email: 'tcw@example.test' });
+  await file('README.md', 'origin\n');
+  await file('other.txt', 'initial\n');
+  await file('excluded.txt', 'excluded\n');
+  git(root, 'add', '--', 'excluded.txt');
+  await write(root, 'commit', { message: 'first', paths: ['README.md', 'other.txt'] });
+  assert.deepEqual(git(root, 'show', '--format=', '--name-only', 'HEAD').split(/\r?\n/), ['README.md', 'other.txt']);
+  assert.equal(git(root, 'diff', '--cached', '--name-only'), 'excluded.txt');
+  await write(root, 'commit', { message: 'include staged file', paths: ['excluded.txt'] });
+  git(root, 'remote', 'add', 'origin', path.join(dir, 'remote.git'));
+  await write(root, 'push');
+  assert.equal((await read(root)).upstream.destination, 'refs/heads/main');
+  await file('new-untracked.txt', 'untracked file');
+  const dirty = await read(root);
+  assert.equal(dirty.changeCount, 1);
+  assert.deepEqual(dirty.files, [{ status: '??', path: 'new-untracked.txt', selectable: true }]);
+  assert.deepEqual([dirty.ahead, dirty.behind], [0, 0]);
+  await fs.unlink(path.join(root, 'new-untracked.txt'));
+
+  await write(root, 'createBranch', { target: 'task/sample' });
+  const store = new Store(path.join(dir, 'settings'));
+  const workbench = new Workbench(store);
+  const workspace = await workbench.importDirectory(root);
+  const project = randomUUID(), task = randomUUID();
+  await workbench.bind(project, workspace.id, null, null);
+  await workbench.bind(project, workspace.id, task, 'task/sample');
+  assert.equal((await store.read()).gitBindings[project].branches[task], 'task/sample');
+  assert.deepEqual(await write(root, 'switch', { target: 'main' }, () => false), { canceled: true });
+  assert.equal((await read(root)).branch, 'task/sample');
+  await file('README.md', 'chosen\n');
+  await file('other.txt', 'excluded staged change\n');
+  git(root, 'add', '--', 'other.txt');
+  await file('new file.txt', 'new text\n');
+  assert.match(await operate(root, 'diff', { path: 'README.md' }), /chosen/);
+  assert.match(await operate(root, 'diff', { path: 'new file.txt' }), /new text/);
+  await assert.rejects(write(root, 'switch', { target: 'main' }), /未提交/);
+  await assert.rejects(write(root, 'commit', { message: 'invalid', paths: ['.'] }), /改动列表/);
+  await write(root, 'commit', { message: 'only selected', paths: ['README.md', 'new file.txt'] });
+  assert.deepEqual(git(root, 'show', '--format=', '--name-only', 'HEAD').split(/\r?\n/), ['README.md', 'new file.txt']);
+  assert.equal(git(root, 'diff', '--cached', '--name-only'), 'other.txt');
+  await write(root, 'push');
+  assert.equal(git(dir, '--git-dir=remote.git', 'rev-parse', 'refs/heads/task/sample'), (await read(root)).head);
+
+  await write(root, 'commit', { message: 'finish selected changes', paths: ['other.txt'] });
+  await write(root, 'switch', { target: 'main' });
+  git(dir, 'clone', 'remote.git', 'peer');
+  const peer = path.join(dir, 'peer');
+  await fs.writeFile(path.join(peer, 'README.md'), 'from peer\n');
+  git(peer, '-c', 'user.name=Peer', '-c', 'user.email=peer@example.test', 'commit', '-am', 'remote update');
+  git(peer, 'push');
+  await write(root, 'fetch');
+  assert.equal((await read(root)).behind, 1);
+  await assert.rejects(write(root, 'push'), /落后/);
+  await write(root, 'pull');
+  assert.equal((await fs.readFile(path.join(root, 'README.md'), 'utf8')).trimEnd(), 'from peer');
+  await file('README.md', 'local edit\n');
+  await assert.rejects(write(root, 'pull'), /未提交/);
+  await write(root, 'commit', { message: 'local edit', paths: ['README.md'] });
+  await fs.writeFile(path.join(peer, 'README.md'), 'other remote edit\n');
+  git(peer, '-c', 'user.name=Peer', '-c', 'user.email=peer@example.test', 'commit', '-am', 'second remote update');
+  git(peer, 'push');
+  await assert.rejects(write(root, 'pull'), /已分叉/);
+  assert.equal(await fs.readFile(path.join(root, 'README.md'), 'utf8'), 'local edit\n');
+});
+
+test('克隆使用临时目录，成功后导入目标，拒绝覆盖并可取消', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tcw-clone-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 3 }));
+  const config = path.join(dir, 'gitconfig');
+  const previousConfig = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = config;
+  t.after(() => {
+    if (previousConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = previousConfig;
+  });
+  git(dir, 'init', '-b', 'main', 'fixture');
+  const fixture = path.join(dir, 'fixture');
+  await fs.writeFile(path.join(fixture, 'README.md'), 'sample');
+  git(fixture, 'add', 'README.md');
+  git(fixture, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-m', 'initial');
+  const address = 'https://github.com/team/workbench.git';
+  git(dir, 'config', '--file', config, 'url.' + fixture.replaceAll('\\', '/') + '.insteadOf', address);
+  const controller = new AbortController();
+  const progress = [];
+  const output = await cloneGithub(dir, address, controller.signal, event => progress.push(event));
+  assert.equal(path.basename(output), 'workbench');
+  assert.equal(await fs.readFile(path.join(output, 'README.md'), 'utf8'), 'sample');
+  assert.ok(progress.length);
+  await assert.rejects(cloneGithub(dir, address, controller.signal, () => {}), /已经存在/);
+  const cancelAddress = 'https://github.com/team/cancel.git';
+  git(dir, 'config', '--file', config, '--add', 'url.' + fixture.replaceAll('\\', '/') + '.insteadOf', cancelAddress);
+  const cancel = new AbortController();
+  await assert.rejects(cloneGithub(dir, cancelAddress, cancel.signal, () => cancel.abort()), /取消/);
+  assert.deepEqual((await fs.readdir(dir)).sort(), ['fixture', 'gitconfig', 'workbench']);
+});
+
+test('克隆地址接受 GitHub HTTPS 和 SSH，拒绝凭据和非法路径', () => {
+  assert.deepEqual(githubAddress('https://github.com/team/workbench/'), {
+    url: 'https://github.com/team/workbench.git', name: 'workbench'
+  });
+  assert.equal(githubAddress('git@github.com:team/workbench.git').name, 'workbench');
+  for (const url of ['https://secret@github.com/team/workbench', 'file:///repo', 'https://github.com/team/..', 'https://github.com/team/CON.git']) {
+    assert.throws(() => githubAddress(url));
+  }
+});

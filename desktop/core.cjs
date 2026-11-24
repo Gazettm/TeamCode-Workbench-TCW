@@ -4,6 +4,8 @@ const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const runFile = promisify(execFile);
+const { operate } = require('./git.cjs');
+const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 
 function validateServerUrl(value) {
   if (typeof value !== 'string' || value.length > 500) throw new Error('请输入有效服务地址');
@@ -99,6 +101,30 @@ class Workbench {
   }
   async list(id, relative = '') { return listDirectory((await this.workspace(id)).root, relative); }
   async status(id) { return inspectRepository((await this.workspace(id)).root); }
+  async git(id, operation, input, confirm) {
+    return operate((await this.workspace(id)).root, operation, input, confirm);
+  }
+  async bind(projectId, workspaceId, taskId, branch) {
+    if (typeof projectId !== 'string' || !uuid.test(projectId) ||
+        (taskId !== null && (typeof taskId !== 'string' || !uuid.test(taskId)))) throw new Error('项目或任务无效。');
+    const workspace = workspaceId ? await this.workspace(workspaceId) : null;
+    if (taskId && (!workspace || !(await this.git(workspace.id, 'read')).branches.includes(branch))) {
+      throw new Error('请选择此仓库中已存在的本地分支。');
+    }
+    return this.store.update(data => {
+      const projects = data.gitBindings ||= {};
+      const previous = projects[projectId];
+      if (taskId) {
+        if (previous?.workspaceId !== workspace.id) throw new Error('项目绑定的仓库已变化，请刷新。');
+        previous.branches[taskId] = branch;
+      } else if (!workspace) {
+        delete projects[projectId];
+      } else if (previous?.workspaceId !== workspace.id) {
+        projects[projectId] = { workspaceId: workspace.id, branches: {} };
+      }
+      return projects;
+    });
+  }
   async saveNote(id, relative, text) {
     const workspace = await this.workspace(id);
     await resolveInside(workspace.root, relative);

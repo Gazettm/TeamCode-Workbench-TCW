@@ -138,6 +138,27 @@ class CollaborationClient {
       }
       let route, method = 'GET', body;
       switch (operation) {
+        case 'tasks': route = '/api/projects/' + id(input.projectId) + '/tasks'; break;
+        case 'activities': {
+          route = '/api/projects/' + id(input.projectId) + '/activities';
+          if (input.before !== undefined) {
+            if (!Number.isSafeInteger(input.before) || input.before < 1) throw new Error('动态游标无效。');
+            route += '?before=' + input.before;
+          }
+          break;
+        }
+        case 'rounds': route = '/api/projects/' + id(input.projectId) + '/tasks/' + id(input.taskId) + '/rounds'; break;
+        case 'createTask': {
+          route = '/api/projects/' + id(input.projectId) + '/tasks'; method = 'POST';
+          body = { title: text(input.title,120), description: input.description || '', assigneeId: input.assigneeId ? id(input.assigneeId) : null, dueAt: input.dueAt || null }; break;
+        }
+        case 'taskAction': {
+          if (!['claim','start','submit','delegate','revoke-review','review','accept','return','assign','deadline','cancel'].includes(input.action)
+              || !Number.isSafeInteger(input.version) || input.version < 0) throw new Error('任务操作或版本无效。');
+          route = '/api/projects/' + id(input.projectId) + '/tasks/' + id(input.taskId) + '/' + input.action;
+          method = 'POST'; body = { version: input.version, text: input.text || null, memberId: input.memberId ? id(input.memberId) : null, dueAt: input.dueAt || null }; break;
+        }
+        case 'removeMember': route = '/api/projects/' + id(input.projectId) + '/members/' + id(input.memberId) + '/remove'; method = 'POST'; body = {reason:text(input.reason,2000)}; break;
         case 'projects': route = '/api/projects'; break;
         case 'createProject': route = '/api/projects'; method = 'POST'; body = { name: text(input.name, 80).trim() }; break;
         case 'members': route = '/api/projects/' + id(input.projectId) + '/members'; break;
