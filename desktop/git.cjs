@@ -287,7 +287,8 @@ async function operate(root, kind, input, confirm) {
         }
       } else {
         if (!before.head) throw new Error('仓库需要先有一次提交。');
-        if (kind === 'createBranch' || input.target !== before.branch) requireClean(before);
+        if (kind === 'switch' && input.target !== before.branch) requireClean(before);
+        if (kind === 'createBranch' && before.dirty) details.push('新分支从当前提交开始，未提交改动会保留。');
       }
     } else if (kind === 'commit') {
       if (!before.branch) throw new Error('请先切换到本地分支。');
@@ -315,10 +316,13 @@ async function operate(root, kind, input, confirm) {
         await git(root, ['config', '--local', '--replace-all', '--', 'user.email', input.email]);
         break;
       case 'switch':
-      case 'createBranch':
-        if (kind === 'switch' && input.target === current.branch) break;
+        if (input.target === current.branch) break;
         requireClean(current);
-        await git(root, ['switch', '--no-guess', '--no-overwrite-ignore', ...(kind === 'createBranch' ? ['-c', input.target, current.head] : [input.target])]);
+        await git(root, ['switch', '--no-guess', '--no-overwrite-ignore', input.target]);
+        break;
+      case 'createBranch':
+        requireIdle(current);
+        await git(root, ['switch', '--no-guess', '--no-overwrite-ignore', '-c', input.target, current.head]);
         break;
       case 'deleteBranch':
       case 'forceDeleteBranch':

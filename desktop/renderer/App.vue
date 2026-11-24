@@ -154,7 +154,7 @@ window.addEventListener('beforeunload', event => { if (changed.value) { event.pr
       </nav>
       <div class="sidebar-bottom">
         <button title="设置" :class="['nav', { active: page === 'settings' }]" :aria-current="page === 'settings' ? 'page' : undefined" @click="switchPage('settings')">⚙ <span>设置</span></button>
-        <div class="version">TCW <span>v{{ state.version || '0.4.5' }}</span></div>
+        <div class="version">TCW <span>v{{ state.version || '0.4.6' }}</span></div>
       </div>
     </aside>
     <main>
