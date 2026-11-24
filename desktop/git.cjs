@@ -1,5 +1,6 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const { execFile, spawn } = require('node:child_process');
 const { promisify, TextDecoder } = require('node:util');
 
@@ -28,8 +29,11 @@ function gitError(error) {
   if (/non-fast-forward|fetch first|stale info|failed to push/i.test(out)) return new Error('远程拒绝推送，请获取远程状态，并检查分支是否落后或被保护。');
   if (/could not resolve|failed to connect|timed out|could not read from remote/i.test(out)) return new Error('无法连接远程仓库，请检查地址、网络和 Git 认证。');
   if (/index.lock|another git process/i.test(out)) return new Error('仓库正被其他 Git 操作占用，请等它完成后重试。');
+  if (/not fully merged/i.test(out)) return new Error('Git 判定此分支尚未合并，已保留分支。Squash 合并也可能出现这种情况。');
+  if (/cannot delete branch.+used by worktree|cannot delete branch.+checked out/i.test(out)) return new Error('此分支正在工作区中使用。请先切换分支后再删除。');
+  if (/couldn't find remote ref/i.test(out)) return new Error('远程分支已不存在，请检查当前分支的上游设置。');
   if (/nothing to commit|no changes added/i.test(out)) return new Error('选中的文件已没有可提交的改动，请刷新。');
-  if (/would be overwritten|not possible to fast-forward/i.test(out)) return new Error('Git 无法安全更新工作区，请在终端检查当前状态。');
+  if (/would be overwritten|not possible to fast-forward|not uptodate|not up to date/i.test(out)) return new Error('Git 无法安全更新工作区，请先处理可能被覆盖的本地文件。');
   return new Error('Git 操作失败。请用终端查看对应 Git 命令的详细输出。');
 }
 
@@ -92,7 +96,8 @@ async function readGit(root) {
       break;
     }
   }
-  return { branch, head, files: files.slice(0, 1000), changeCount: files.length, commitLimit, dirty: files.length > 0, truncated: files.length > 1000,
+  const staged = files.some(file => file.status !== '??' && file.status[0] !== ' ');
+  return { branch, head, files: files.slice(0, 1000), changeCount: files.length, commitLimit, dirty: files.length > 0, staged, truncated: files.length > 1000,
     branches, inProgress, upstream, ahead, behind, author: { name, email }, hasOrigin: origin.split(/\r?\n/).includes('origin') };
 }
 
@@ -175,7 +180,73 @@ async function target(root, info, operation) {
 }
 
 const titles = { author: '保存仓库作者', switch: '切换分支', createBranch: '创建并切换分支', commit: '本地提交',
-  fetch: '获取远程状态', pull: '快进更新', push: '推送' };
+  fetch: '获取远程状态', pull: '快进更新', push: '推送', align: '对齐到远程分支', deleteBranch: '删除本地分支' };
+
+function requireNoStaged(info) {
+  if (info.staged) throw new Error('对齐会重置暂存区。请先提交或取消暂存，再对齐分支。');
+}
+
+async function protectIgnoredFiles(root, from, to) {
+  const [ignored, changed] = await Promise.all([
+    git(root, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '--no-empty-directory', '-z']),
+    git(root, ['diff', '--name-only', '--no-renames', '--diff-filter=AMT', '-z', from, to, '--'])
+  ]);
+  const normalize = file => process.platform === 'win32' ? file.toLowerCase() : file;
+  const paths = nul(ignored).map(normalize);
+  for (const file of nul(changed)) {
+    const name = normalize(file);
+    let blocked = paths.some(entry => entry === name || entry.startsWith(name + '/') ||
+      (!entry.endsWith('/') && name.startsWith(entry + '/')));
+    if (!blocked && paths.some(entry => entry.endsWith('/') && name.startsWith(entry))) {
+      blocked = await fs.lstat(path.join(root, file)).then(() => true, error => {
+        if (error.code === 'ENOENT') return false;
+        if (error.code === 'ENOTDIR') return true;
+        throw error;
+      });
+    }
+    if (blocked) throw new Error('对齐会覆盖被 Git 忽略的本地文件。请先处理：' + file);
+  }
+}
+
+async function alignBranch(root, before, confirm) {
+  requireBranch(before);
+  requireNoStaged(before);
+  const ref = before.upstream?.ref;
+  if (!ref?.startsWith('refs/remotes/')) throw new Error('请先为当前分支设置远程上游。');
+  const remote = await target(root, before, 'fetch');
+  await git(root, ['fetch', '--no-tags', '--no-recurse-submodules', '--', remote.remote, '+' + remote.ref + ':' + ref], network);
+  const fetched = await readGit(root);
+  sameHead(before, fetched);
+  requireIdle(fetched);
+  if (fetched.upstream?.ref !== ref) throw new Error('远程目标已变化，请重新确认。');
+  const targetHead = await value(root, ['rev-parse', '--verify', ref]);
+  if (targetHead === before.head) return { canceled: false, alreadyAligned: true };
+  const backup = 'tcw-backup-' + new Date().toISOString().replace(/\D/g, '').slice(0, 14) + '-' + randomUUID().slice(0, 8);
+  const detail = [
+    root,
+    '本地 ' + before.branch + ' · ' + before.head.slice(0, 12),
+    '远程 ' + remote.remote + '/' + remote.ref.slice(heads.length) + ' · ' + targetHead.slice(0, 12),
+    '本地分支将指向上述远程提交。原提交保存在本地备份分支 ' + backup + '。',
+    '未暂存的改动会尽量保留，遇到有改动的同一文件会停止。'
+  ].join('\n');
+  if (!await confirm(titles.align, detail)) return { canceled: true };
+  const current = await readGit(root);
+  sameHead(before, current);
+  requireIdle(current);
+  requireNoStaged(current);
+  if (current.upstream?.ref !== ref || await value(root, ['rev-parse', '--verify', ref]) !== targetHead ||
+      JSON.stringify(remote) !== JSON.stringify(await target(root, current, 'fetch'))) {
+    throw new Error('远程目标已变化，请重新确认。');
+  }
+  await protectIgnoredFiles(root, current.head, targetHead);
+  await git(root, ['branch', '--no-track', '--', backup, current.head]);
+  try {
+    await git(root, ['reset', '--keep', '--no-recurse-submodules', targetHead]);
+  } catch (error) {
+    throw new Error(error.message + ' 原提交已保存在 ' + backup + '。');
+  }
+  return { canceled: false, backup };
+}
 
 async function operate(root, kind, input, confirm) {
   if (kind === 'read') return readGit(root);
@@ -185,21 +256,29 @@ async function operate(root, kind, input, confirm) {
     const before = await readGit(root);
     sameHead(input, before);
     requireIdle(before);
+    if (kind === 'align') return alignBranch(root, before, confirm);
     let details = [];
     let destination;
+    let deletedTip;
     if (kind === 'author') {
       if (typeof input.name !== 'string' || typeof input.email !== 'string' || !input.name.trim() || input.name.length > 100 ||
           /[\u0000-\u001f<>]/.test(input.name) || input.email.length > 200 || !/^[^\s<>@]+@[^\s<>@]+$/.test(input.email)) {
         throw new Error('请填写有效的 Git 姓名和邮箱。');
       }
       details = [input.name.trim(), input.email];
-    } else if (kind === 'switch' || kind === 'createBranch') {
+    } else if (kind === 'switch' || kind === 'createBranch' || kind === 'deleteBranch') {
       if (typeof input.target !== 'string' || !input.target || input.target.length > 240 || input.target.startsWith('-')) throw new Error('请输入有效的本地分支名。');
       await git(root, ['check-ref-format', heads + input.target]);
-      if (!before.head) throw new Error('仓库需要先有一次提交。');
-      if (kind === 'createBranch' || input.target !== before.branch) requireClean(before);
-      if (before.branches.includes(input.target) !== (kind === 'switch')) throw new Error('目标分支状态已变化，请刷新后重试。');
+      if (before.branches.includes(input.target) !== (kind !== 'createBranch')) throw new Error('目标分支状态已变化，请刷新后重试。');
       details = ['目标分支 ' + input.target];
+      if (kind === 'deleteBranch') {
+        if (input.target === before.branch) throw new Error('请先切换分支，再删除当前分支。');
+        deletedTip = await value(root, ['rev-parse', '--verify', heads + input.target]);
+        details.push('分支提交 ' + deletedTip.slice(0, 12), '此操作删除本地分支。');
+      } else {
+        if (!before.head) throw new Error('仓库需要先有一次提交。');
+        if (kind === 'createBranch' || input.target !== before.branch) requireClean(before);
+      }
     } else if (kind === 'commit') {
       if (!before.branch) throw new Error('请先切换到本地分支。');
       if (!before.author.name || !before.author.email) throw new Error('请先在设置中填写此仓库的 Git 作者姓名和邮箱。');
@@ -231,6 +310,12 @@ async function operate(root, kind, input, confirm) {
         requireClean(current);
         await git(root, ['switch', '--no-guess', '--no-overwrite-ignore', ...(kind === 'createBranch' ? ['-c', input.target, current.head] : [input.target])]);
         break;
+      case 'deleteBranch':
+        if (!current.branches.includes(input.target) || await value(root, ['rev-parse', '--verify', heads + input.target]) !== deletedTip) {
+          throw new Error('待删除分支已变化，请刷新后重新确认。');
+        }
+        await git(root, ['branch', '--delete', '--', input.target]);
+        break;
       case 'commit': {
         const files = selectedFiles(current, input.paths);
         const added = files.filter(file => file.status === '??').map(file => file.path);
@@ -256,7 +341,7 @@ async function operate(root, kind, input, confirm) {
         requireIdle(fetched);
         requireClean(fetched);
         if (fetched.upstream?.ref !== before.upstream.ref || fetched.behind === null) throw new Error('远程跟踪分支已不存在或无法确认。');
-        if (fetched.ahead > 0 && fetched.behind > 0) throw new Error('本地和远程分支已分叉，请在终端处理。');
+        if (fetched.ahead > 0 && fetched.behind > 0) throw new Error('本地和远程分支已分叉。要把当前分支对齐到远程，可在「更多」中选择「对齐到远程分支」。');
         if (fetched.behind > 0) {
           const tip = await value(root, ['rev-parse', '--verify', fetched.upstream.ref]);
           await git(root, ['merge', '--ff-only', '--no-autostash', '--no-overwrite-ignore', tip], network);
