@@ -255,6 +255,7 @@ app.whenReady().then(async () => {
       await fixtureGit('add', 'local.txt');
       await fixtureGit('commit', '-m', 'diverged local change');
       const original = (await fixtureGit('rev-parse', 'HEAD')).stdout.trim();
+      await fixtureGit('branch', 'test/delete-unmerged');
       await window.webContents.executeJavaScript(`(async()=>{
         const refresh=[...document.querySelectorAll('.git-remote button')].find(button=>button.textContent.trim()==='刷新 Git 状态');
         refresh.click();
@@ -267,11 +268,11 @@ app.whenReady().then(async () => {
       })()`);
       await captureLayout('git-more', '.git-more-panel');
       await window.webContents.executeJavaScript(`(async()=>{
-        const wait=async (test,label)=>{
+        const wait=async (test,label,allowError=false)=>{
           for(let n=0;n<140;n++){
             if(test())return;
             const error=document.querySelector('.git-panel .error');
-            if(error)throw new Error(label+': '+error.textContent);
+            if(error&&!allowError)throw new Error(label+': '+error.textContent);
             await new Promise(resolve=>setTimeout(resolve,50));
           }
           throw new Error(label+' 超时');
@@ -291,15 +292,35 @@ app.whenReady().then(async () => {
         button.click();
         await wait(()=>document.querySelector('.git-panel .success')?.textContent.includes('已删除本地分支')
           && !document.querySelector('.workspace-bar select')?.disabled,'删除本地分支');
+        const selectUnmerged = async () => {
+          document.querySelector('.git-more summary').click();
+          document.querySelector('#git-show-delete').click();
+          await wait(()=>document.querySelector('#git-branch-to-delete'),'选择尚未合并的分支',true);
+          const select=document.querySelector('#git-branch-to-delete');
+          select.value='test/delete-unmerged';
+          select.dispatchEvent(new Event('change',{bubbles:true}));
+        };
+        await selectUnmerged();
+        const ordinary=document.querySelector('.git-delete-form button[type="submit"]');
+        await wait(()=>!ordinary.disabled,'普通删除可用');
+        ordinary.click();
+        await wait(()=>document.querySelector('.git-panel .error')?.textContent.includes('尚未合并'),'普通删除保护');
+        await selectUnmerged();
+        const force=document.querySelector('.git-delete-form button.danger');
+        await wait(()=>!force.disabled,'强制删除可用',true);
+        force.click();
+        await wait(()=>!document.querySelector('.git-panel .error'),'清除上一次普通删除提示',true);
+        await wait(()=>document.querySelector('.git-panel .success')?.textContent.includes('已强制删除本地分支')
+          && !document.querySelector('.workspace-bar select')?.disabled,'强制删除本地分支');
       })()`);
       const after = await fixtureGit('for-each-ref', '--format=%(refname:short) %(objectname)', 'refs/heads/');
       if (!after.stdout.split(/\r?\n/).some(line => line.startsWith('tcw-backup-') && line.endsWith(original)) ||
-          after.stdout.includes('test/delete-after-merge') ||
+          after.stdout.includes('test/delete-after-merge') || after.stdout.includes('test/delete-unmerged') ||
           (await fixtureGit('rev-list', '--left-right', '--count', 'HEAD...origin/main')).stdout.trim() !== '0\t0') {
         throw new Error('Git 对齐或删除操作结果未通过验证');
       }
       evidence.checks = ['Vue 加载', 'preload 桥接', 'Node 隔离', '仓库选择与文件展示', '页面备注保存', '页面设置保存'];
-      evidence.git = { author: true, selectedCommit: true, branch: true, selectAll: true, commitHints: true, fileStatuses: true, align: true, deleteBranch: true };
+      evidence.git = { author: true, selectedCommit: true, branch: true, selectAll: true, commitHints: true, fileStatuses: true, align: true, deleteBranch: true, forceDeleteBranch: true };
       evidence.fontSizes = sizes;
       if (process.env.TCW_SMOKE_SERVER_URL) {
         evidence.collaboration = await require('./project-smoke.cjs').runProjectSmoke(window);

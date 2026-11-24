@@ -29,7 +29,7 @@ function gitError(error) {
   if (/non-fast-forward|fetch first|stale info|failed to push/i.test(out)) return new Error('远程拒绝推送，请获取远程状态，并检查分支是否落后或被保护。');
   if (/could not resolve|failed to connect|timed out|could not read from remote/i.test(out)) return new Error('无法连接远程仓库，请检查地址、网络和 Git 认证。');
   if (/index.lock|another git process/i.test(out)) return new Error('仓库正被其他 Git 操作占用，请等它完成后重试。');
-  if (/not fully merged/i.test(out)) return new Error('Git 判定此分支尚未合并，已保留分支。Squash 合并也可能出现这种情况。');
+  if (/not fully merged/i.test(out)) return new Error('Git 判定此分支尚未合并，已保留分支。确认无需这段历史后，可选择「强制删除」。');
   if (/cannot delete branch.+used by worktree|cannot delete branch.+checked out/i.test(out)) return new Error('此分支正在工作区中使用。请先切换分支后再删除。');
   if (/couldn't find remote ref/i.test(out)) return new Error('远程分支已不存在，请检查当前分支的上游设置。');
   if (/nothing to commit|no changes added/i.test(out)) return new Error('选中的文件已没有可提交的改动，请刷新。');
@@ -180,7 +180,8 @@ async function target(root, info, operation) {
 }
 
 const titles = { author: '保存仓库作者', switch: '切换分支', createBranch: '创建并切换分支', commit: '本地提交',
-  fetch: '获取远程状态', pull: '快进更新', push: '推送', align: '对齐到远程分支', deleteBranch: '删除本地分支' };
+  fetch: '获取远程状态', pull: '快进更新', push: '推送', align: '对齐到远程分支',
+  deleteBranch: '删除本地分支', forceDeleteBranch: '强制删除本地分支' };
 
 function requireNoStaged(info) {
   if (info.staged) throw new Error('对齐会重置暂存区。请先提交或取消暂存，再对齐分支。');
@@ -252,6 +253,7 @@ async function operate(root, kind, input, confirm) {
   if (kind === 'read') return readGit(root);
   if (kind === 'diff') return diff(root, input.path);
   if (!Object.hasOwn(titles, kind)) throw new Error('不支持该 Git 操作。');
+  const deleting = kind === 'deleteBranch' || kind === 'forceDeleteBranch';
   return locked(root, async () => {
     const before = await readGit(root);
     sameHead(input, before);
@@ -266,15 +268,18 @@ async function operate(root, kind, input, confirm) {
         throw new Error('请填写有效的 Git 姓名和邮箱。');
       }
       details = [input.name.trim(), input.email];
-    } else if (kind === 'switch' || kind === 'createBranch' || kind === 'deleteBranch') {
+    } else if (kind === 'switch' || kind === 'createBranch' || deleting) {
       if (typeof input.target !== 'string' || !input.target || input.target.length > 240 || input.target.startsWith('-')) throw new Error('请输入有效的本地分支名。');
       await git(root, ['check-ref-format', heads + input.target]);
       if (before.branches.includes(input.target) !== (kind !== 'createBranch')) throw new Error('目标分支状态已变化，请刷新后重试。');
       details = ['目标分支 ' + input.target];
-      if (kind === 'deleteBranch') {
+      if (deleting) {
         if (input.target === before.branch) throw new Error('请先切换分支，再删除当前分支。');
         deletedTip = await value(root, ['rev-parse', '--verify', heads + input.target]);
         details.push('分支提交 ' + deletedTip.slice(0, 12), '此操作删除本地分支。');
+        if (kind === 'forceDeleteBranch') {
+          details.push('将跳过已合并检查。仅由此分支保留的提交可能难以恢复。');
+        }
       } else {
         if (!before.head) throw new Error('仓库需要先有一次提交。');
         if (kind === 'createBranch' || input.target !== before.branch) requireClean(before);
@@ -311,10 +316,11 @@ async function operate(root, kind, input, confirm) {
         await git(root, ['switch', '--no-guess', '--no-overwrite-ignore', ...(kind === 'createBranch' ? ['-c', input.target, current.head] : [input.target])]);
         break;
       case 'deleteBranch':
+      case 'forceDeleteBranch':
         if (!current.branches.includes(input.target) || await value(root, ['rev-parse', '--verify', heads + input.target]) !== deletedTip) {
           throw new Error('待删除分支已变化，请刷新后重新确认。');
         }
-        await git(root, ['branch', '--delete', '--', input.target]);
+        await git(root, ['branch', kind === 'forceDeleteBranch' ? '-D' : '-d', '--', input.target]);
         break;
       case 'commit': {
         const files = selectedFiles(current, input.paths);

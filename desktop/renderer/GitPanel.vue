@@ -70,7 +70,8 @@ const write = (kind, fields) => run(async () => {
   message.value = {
     push: '推送成功。', fetch: '远程状态已获取。', pull: '快进检查完成。', commit: '本地提交已创建。',
     align: result.alreadyAligned ? '当前分支已与上游一致。' : '已对齐到远程分支。原提交保存在 ' + result.backup + '。',
-    deleteBranch: '已删除本地分支 ' + fields?.target + '。'
+    deleteBranch: '已删除本地分支 ' + fields?.target + '。',
+    forceDeleteBranch: '已强制删除本地分支 ' + fields?.target + '。'
   }[kind] || '操作已保存。';
 });
 function closeMore() {
@@ -142,7 +143,10 @@ watch(() => props.workspace.id, () => run(load), { immediate: true });
                     <option value="" disabled>选择分支</option>
                     <option v-for="name in deletableBranches" :key="name">{{ name }}</option>
                   </select>
-                  <button :disabled="busy || !deletableBranches.includes(branchToDelete)">继续删除</button>
+                  <div class="button-line">
+                    <button type="submit" :disabled="busy || !deletableBranches.includes(branchToDelete)">继续删除</button>
+                    <button type="button" class="danger" :disabled="busy || !deletableBranches.includes(branchToDelete)" @click="runMore('forceDeleteBranch', { target: branchToDelete })">强制删除</button>
+                  </div>
                 </form>
               </div>
             </details>

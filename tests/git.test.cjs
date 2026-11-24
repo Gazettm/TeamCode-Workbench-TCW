@@ -187,6 +187,26 @@ test('对齐分叉会备份原提交和保留无关改动，删除只处理可�
   await write(root, 'deleteBranch', { target: 'already-merged' });
   assert.ok(!(await read(root)).branches.includes('already-merged'));
   assert.ok((await read(root)).branches.includes('not-yet-merged'));
+
+  const target = { target: 'not-yet-merged' };
+  await assert.rejects(write(root, 'forceDeleteBranch', { target: 'main' }), /当前分支/);
+  const canceledRemoval = await write(root, 'forceDeleteBranch', target, (title, detail) => {
+    assert.equal(title, '强制删除本地分支');
+    assert.match(detail, /not-yet-merged/);
+    assert.ok(detail.includes(original.slice(0, 12)));
+    assert.match(detail, /跳过已合并检查/);
+    return false;
+  });
+  assert.deepEqual(canceledRemoval, { canceled: true });
+  assert.ok((await read(root)).branches.includes(target.target));
+  const linked = path.join(dir, 'linked');
+  git(root, 'worktree', 'add', linked, target.target);
+  await assert.rejects(write(root, 'forceDeleteBranch', target), /工作区中使用/);
+  git(linked, 'switch', '--detach');
+  const remoteBefore = git(dir, '--git-dir=remote.git', 'show-ref');
+  await write(root, 'forceDeleteBranch', target);
+  assert.ok(!(await read(root)).branches.includes(target.target));
+  assert.equal(git(dir, '--git-dir=remote.git', 'show-ref'), remoteBefore);
 });
 
 test('克隆地址接受 GitHub HTTPS 和 SSH，拒绝凭据和非法路径', () => {
