@@ -209,7 +209,7 @@ async function protectIgnoredFiles(root, from, to) {
   }
 }
 
-async function alignBranch(root, before, confirm) {
+async function alignBranch(root, before, keepBackup, confirm) {
   requireBranch(before);
   requireNoStaged(before);
   const ref = before.upstream?.ref;
@@ -222,12 +222,16 @@ async function alignBranch(root, before, confirm) {
   if (fetched.upstream?.ref !== ref) throw new Error('远程目标已变化，请重新确认。');
   const targetHead = await value(root, ['rev-parse', '--verify', ref]);
   if (targetHead === before.head) return { canceled: false, alreadyAligned: true };
-  const backup = 'tcw-backup-' + new Date().toISOString().replace(/\D/g, '').slice(0, 14) + '-' + randomUUID().slice(0, 8);
+  const backup = keepBackup
+    ? 'tcw-backup-' + new Date().toISOString().replace(/\D/g, '').slice(0, 14) + '-' + randomUUID().slice(0, 8)
+    : null;
   const detail = [
     root,
     '本地 ' + before.branch + ' · ' + before.head.slice(0, 12),
     '远程 ' + remote.remote + '/' + remote.ref.slice(heads.length) + ' · ' + targetHead.slice(0, 12),
-    '本地分支将指向上述远程提交。原提交保存在本地备份分支 ' + backup + '。',
+    '本地分支将指向上述远程提交。',
+    backup ? '原提交将保存在本地备份分支 ' + backup + '。'
+      : '本次不创建备份分支。当前分支独有的提交将从这条分支的历史中移除。',
     '未暂存的改动会尽量保留，遇到有改动的同一文件会停止。'
   ].join('\n');
   if (!await confirm(titles.align, detail)) return { canceled: true };
@@ -240,10 +244,11 @@ async function alignBranch(root, before, confirm) {
     throw new Error('远程目标已变化，请重新确认。');
   }
   await protectIgnoredFiles(root, current.head, targetHead);
-  await git(root, ['branch', '--no-track', '--', backup, current.head]);
+  if (backup) await git(root, ['branch', '--no-track', '--', backup, current.head]);
   try {
     await git(root, ['reset', '--keep', '--no-recurse-submodules', targetHead]);
   } catch (error) {
+    if (!backup) throw error;
     throw new Error(error.message + ' 原提交已保存在 ' + backup + '。');
   }
   return { canceled: false, backup };
@@ -258,7 +263,7 @@ async function operate(root, kind, input, confirm) {
     const before = await readGit(root);
     sameHead(input, before);
     requireIdle(before);
-    if (kind === 'align') return alignBranch(root, before, confirm);
+    if (kind === 'align') return alignBranch(root, before, input.keepBackup === true, confirm);
     let details = [];
     let destination;
     let deletedTip;
