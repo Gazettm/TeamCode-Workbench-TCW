@@ -165,6 +165,7 @@ button.open-folder { flex: 0 0 33px; background: transparent; border-color: tran
   background: var(--surface); box-shadow: 0 8px 23px #16294126;
 }
 .git-more-panel > button { text-align: left; }
+.git-align-backup { display: flex; align-items: center; gap: 7px; }
 .git-more-panel .git-delete-form { margin: 0; padding: 9px 0 0; border-top: 1px solid var(--line); }
 .git-delete-form button.danger { color: #9b302a; border-color: #edcac6; }
 .git-delete-form button.danger:hover:not(:disabled) { background: #fff0ee; border-color: #dcada8; }

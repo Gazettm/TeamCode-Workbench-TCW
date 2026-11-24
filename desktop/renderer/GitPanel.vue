@@ -7,6 +7,7 @@ const info = ref(null), error = ref(''), message = ref(''), busy = ref(false);
 const authorName = ref(''), email = ref(''), branch = ref(''), newBranch = ref('');
 const files = ref([]), summary = ref(''), preview = ref(null);
 const moreTools = ref(null), chooseDeletion = ref(false), branchToDelete = ref('');
+const keepAlignBackup = ref(false);
 const deletableBranches = computed(() => info.value?.branches.filter(name => name !== info.value.branch) || []);
 const alignUnavailable = computed(() => {
   const data = info.value;
@@ -69,7 +70,8 @@ const write = (kind, fields) => run(async () => {
   emit('changed');
   message.value = {
     push: '推送成功。', fetch: '远程状态已获取。', pull: '快进检查完成。', commit: '本地提交已创建。',
-    align: result.alreadyAligned ? '当前分支已与上游一致。' : '已对齐到远程分支。原提交保存在 ' + result.backup + '。',
+    align: result.alreadyAligned ? '当前分支已与上游一致。' :
+      '已对齐到远程分支。' + (result.backup ? '原提交保存在 ' + result.backup + '。' : ''),
     deleteBranch: '已删除本地分支 ' + fields?.target + '。',
     forceDeleteBranch: '已强制删除本地分支 ' + fields?.target + '。'
   }[kind] || '操作已保存。';
@@ -83,6 +85,7 @@ function runMore(kind, fields) {
   closeMore();
   chooseDeletion.value = false;
   branchToDelete.value = '';
+  if (kind === 'align') keepAlignBackup.value = false;
   return write(kind, fields);
 }
 const showDiff = file => run(async () => {
@@ -94,7 +97,10 @@ function diffLineClass(line) {
   if (line.startsWith('+') && !line.startsWith('+++ ')) return 'diff-add';
   if (line.startsWith('-') && !line.startsWith('--- ')) return 'diff-remove';
 }
-watch(() => props.workspace.id, () => run(load), { immediate: true });
+watch(() => props.workspace.id, () => {
+  keepAlignBackup.value = false;
+  return run(load);
+}, { immediate: true });
 </script>
 
 <template>
@@ -134,8 +140,13 @@ watch(() => props.workspace.id, () => run(load), { immediate: true });
             <details ref="moreTools" class="git-more" @keydown.esc.stop="closeMore">
               <summary>更多 <span aria-hidden="true">▾</span></summary>
               <div class="git-more-panel">
-                <button id="git-align-remote" :disabled="busy || !!alignUnavailable" @click="runMore('align')">对齐到远程分支</button>
-                <p class="hint">{{ alignUnavailable || '先获取上游，再保留本地备份并对齐当前分支。' }}</p>
+                <button id="git-align-remote" :disabled="busy || !!alignUnavailable"
+                  @click="runMore('align', { keepBackup: keepAlignBackup })">对齐到远程分支</button>
+                <label class="git-align-backup">
+                  <input id="git-keep-align-backup" v-model="keepAlignBackup" type="checkbox" :disabled="busy || !!alignUnavailable">
+                  保留备份分支
+                </label>
+                <p v-if="alignUnavailable" class="hint">{{ alignUnavailable }}</p>
                 <button id="git-show-delete" :aria-expanded="chooseDeletion" :disabled="busy || info.inProgress || !deletableBranches.length" @click="chooseDeletion = !chooseDeletion">删除本地分支</button>
                 <form v-if="chooseDeletion" class="collab-form git-delete-form" @submit.prevent="runMore('deleteBranch', { target: branchToDelete })">
                   <label for="git-branch-to-delete">要删除的本地分支</label>
@@ -160,7 +171,7 @@ watch(() => props.workspace.id, () => run(load), { immediate: true });
           <div><label>本地分支 <select v-model="branch"><option value="" disabled>选择分支</option><option v-for="name in info.branches" :key="name">{{ name }}</option></select></label>
             <button :disabled="!branch || branch === info.branch || info.dirty" @click="write('switch', { target: branch })">切换分支</button></div>
           <div><label>新分支 <input v-model.trim="newBranch" maxlength="120"></label>
-            <button :disabled="!newBranch || !info.head || info.dirty" @click="write('createBranch', { target: newBranch })">从当前提交创建</button></div>
+            <button :disabled="!newBranch || !info.head || info.dirty" @click="write('createBranch', { target: newBranch })">创建并切换</button></div>
         </div>
         </details>
         </fieldset>
@@ -192,6 +203,7 @@ watch(() => props.workspace.id, () => run(load), { immediate: true });
         </div>
         <form v-if="info.files.length" class="collab-form" @submit.prevent="write('commit', { paths: Array.from(files), message: summary })">
           <label for="commit-message">提交说明（必填）</label><textarea id="commit-message" v-model.trim="summary" maxlength="1000" required></textarea>
+          <p v-if="info.branch" class="hint">将提交到本地分支 <strong>{{ info.branch }}</strong></p>
           <p v-if="commitHint" id="git-commit-hint" class="hint">{{ commitHint }}</p>
           <div class="button-line">
             <button class="primary" :disabled="!!commitHint" :aria-describedby="commitHint ? 'git-commit-hint' : undefined">提交选中的 {{ files.length }} 个文件</button>

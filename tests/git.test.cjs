@@ -41,7 +41,9 @@ test('选择提交、保留无关暂存，分支切换和远程更新遵守安�
   assert.deepEqual([dirty.ahead, dirty.behind], [0, 0]);
   await fs.unlink(path.join(root, 'new-untracked.txt'));
 
+  const mainBeforeBranch = git(root, 'rev-parse', 'refs/heads/main');
   await write(root, 'createBranch', { target: 'task/sample' });
+  assert.equal(git(root, 'rev-parse', 'refs/heads/main'), mainBeforeBranch);
   const store = new Store(path.join(dir, 'settings'));
   const workbench = new Workbench(store);
   const workspace = await workbench.importDirectory(root);
@@ -67,13 +69,16 @@ test('选择提交、保留无关暂存，分支切换和远程更新遵守安�
 
   await write(root, 'commit', { message: 'finish selected changes', paths: ['other.txt'] });
   await write(root, 'switch', { target: 'main' });
+  assert.equal(git(root, 'rev-parse', 'HEAD'), mainBeforeBranch);
   git(dir, 'clone', 'remote.git', 'peer');
   const peer = path.join(dir, 'peer');
+  git(peer, 'merge', '--squash', 'origin/task/sample');
   await fs.writeFile(path.join(peer, 'README.md'), 'from peer\n');
   git(peer, '-c', 'user.name=Peer', '-c', 'user.email=peer@example.test', 'commit', '-am', 'remote update');
   git(peer, 'push');
   await write(root, 'fetch');
-  assert.equal((await read(root)).behind, 1);
+  const afterSquash = await read(root);
+  assert.deepEqual([afterSquash.ahead, afterSquash.behind], [0, 1]);
   await assert.rejects(write(root, 'push'), /落后/);
   await write(root, 'pull');
   assert.equal((await fs.readFile(path.join(root, 'README.md'), 'utf8')).trimEnd(), 'from peer');
@@ -118,7 +123,7 @@ test('克隆使用临时目录，成功后导入目标，拒绝覆盖并可取�
   assert.deepEqual((await fs.readdir(dir)).sort(), ['fixture', 'gitconfig', 'workbench']);
 });
 
-test('对齐分叉会备份原提交和保留无关改动，删除只处理可安全删除的本地分支', async t => {
+test('对齐分叉默认不备份并可手动保留备份，删除本地分支遵守保护条件', async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tcw-align-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 3 }));
   git(dir, 'init', '--bare', '-b', 'main', 'remote.git');
@@ -145,7 +150,7 @@ test('对齐分叉会备份原提交和保留无关改动，删除只处理可�
   commit(peer, 'remote update');
   git(peer, 'push');
 
-  const canceled = await write(root, 'align', {}, (message, detail) => {
+  const canceled = await write(root, 'align', { keepBackup: true }, (message, detail) => {
     assert.equal(message, '对齐到远程分支');
     assert.match(detail, /远程 origin\/main/);
     assert.match(detail, /本地备份分支 tcw-backup-/);
@@ -173,12 +178,23 @@ test('对齐分叉会备份原提交和保留无关改动，删除只处理可�
   assert.equal(await fs.readFile(path.join(root, 'workspace.local'), 'utf8'), 'ignored local settings\n');
   await fs.rename(path.join(root, 'workspace.local'), path.join(dir, 'workspace.local'));
 
-  const aligned = await write(root, 'align');
-  assert.equal(git(root, 'rev-parse', aligned.backup), original);
+  const aligned = await write(root, 'align', {}, (_message, detail) => {
+    assert.match(detail, /本次不创建备份分支/);
+    return true;
+  });
+  assert.deepEqual(aligned, { canceled: false, backup: null });
   const info = await read(root);
   assert.deepEqual([info.ahead, info.behind], [0, 0]);
+  assert.ok(!info.branches.some(name => name.startsWith('tcw-backup-')));
   assert.equal(await fs.readFile(path.join(root, 'note.txt'), 'utf8'), 'keep this edit\n');
-  assert.deepEqual(await write(root, 'align'), { canceled: false, alreadyAligned: true });
+  assert.deepEqual(await write(root, 'align', { keepBackup: true }), { canceled: false, alreadyAligned: true });
+  assert.equal(git(root, 'for-each-ref', 'refs/heads/tcw-backup-*'), '');
+
+  git(root, 'reset', '--keep', original);
+  const withBackup = await write(root, 'align', { keepBackup: true });
+  assert.match(withBackup.backup, /^tcw-backup-/);
+  assert.equal(git(root, 'rev-parse', withBackup.backup), original);
+  assert.equal(await fs.readFile(path.join(root, 'note.txt'), 'utf8'), 'keep this edit\n');
 
   await assert.rejects(write(root, 'deleteBranch', { target: 'main' }), /当前分支/);
   await assert.rejects(write(root, 'deleteBranch', { target: 'not-yet-merged' }), /尚未合并/);

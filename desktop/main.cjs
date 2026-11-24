@@ -223,6 +223,7 @@ app.whenReady().then(async () => {
         await wait(()=>document.querySelector('.git-author-editor .success') && !button('保存 Git 作者').disabled,'保存 Git 作者');
         document.querySelector('.sidebar .nav').click();
         await wait(()=>button('全选')&&!button('全选').matches(':disabled'),'加载 Git 改动');
+        if(document.querySelector('.git-changes form .hint strong')?.textContent!=='main') throw new Error('提交区未标明目标分支');
         button('全选').click();
         await wait(()=>button('提交选中的 2 个文件'),'重新全选');
         if(!button('提交选中的 2 个文件').matches(':disabled') || !document.querySelector('#git-commit-hint')?.textContent.includes('填写提交说明')) throw new Error('缺少提交说明提示');
@@ -233,8 +234,8 @@ app.whenReady().then(async () => {
         document.querySelector('.branch-tools summary').click();
         const branch=document.querySelector('.git-controls input');
         edit(branch,'task/smoke');
-        await wait(()=>!button('从当前提交创建').disabled,'创建分支按钮');
-        button('从当前提交创建').click();
+        await wait(()=>!button('创建并切换').disabled,'创建分支按钮');
+        button('创建并切换').click();
         await wait(()=>document.querySelector('#git-current-branch')?.textContent==='task/smoke'
           && !document.querySelector('.workspace-bar select')?.disabled,'切换到新分支');
       })()`);
@@ -256,17 +257,49 @@ app.whenReady().then(async () => {
       await fixtureGit('commit', '-m', 'diverged local change');
       const original = (await fixtureGit('rev-parse', 'HEAD')).stdout.trim();
       await fixtureGit('branch', 'test/delete-unmerged');
-      await window.webContents.executeJavaScript(`(async()=>{
+      const openAlignMenu = () => window.webContents.executeJavaScript(`(async()=>{
         const refresh=[...document.querySelectorAll('.git-remote button')].find(button=>button.textContent.trim()==='刷新 Git 状态');
         refresh.click();
         for(let n=0;n<140;n++){
-          const target=document.querySelector('#git-align-remote');
-          if(target&&!target.disabled){document.querySelector('.git-more summary').click();return}
           await new Promise(resolve=>setTimeout(resolve,50));
+          const target=document.querySelector('#git-align-remote');
+          if(target&&!target.disabled&&document.querySelector('.git-ref .pill')?.textContent.includes('领先 1')){
+            document.querySelector('.git-more summary').click();
+            return;
+          }
         }
         throw new Error('Git 更多菜单未读取上游');
       })()`);
+      await openAlignMenu();
       await captureLayout('git-more', '.git-more-panel');
+      const alignFromMenu = (keepBackup) => window.webContents.executeJavaScript(`(async()=>{
+        const option=document.querySelector('#git-keep-align-backup');
+        if(!option||option.checked||option.disabled)throw new Error('保留备份分支应默认关闭');
+        if(${keepBackup}){
+          option.click();
+          await Promise.resolve();
+        }
+        document.querySelector('#git-align-remote').click();
+        for(let n=0;n<140;n++){
+          const error=document.querySelector('.git-panel .error');
+          if(error)throw new Error('对齐远程失败：'+error.textContent);
+          const status=document.querySelector('.git-panel .success')?.textContent;
+          if(status?.includes('已对齐到远程分支')&&!document.querySelector('.workspace-bar select')?.disabled){
+            if(status.includes('原提交保存在')!==${keepBackup})throw new Error('备份提示与勾选状态不符');
+            return;
+          }
+          await new Promise(resolve=>setTimeout(resolve,50));
+        }
+        throw new Error('对齐远程超时');
+      })()`);
+      await alignFromMenu(false);
+      if ((await fixtureGit('for-each-ref', 'refs/heads/tcw-backup-*')).stdout.trim() ||
+          (await fixtureGit('rev-list', '--left-right', '--count', 'HEAD...origin/main')).stdout.trim() !== '0\t0') {
+        throw new Error('默认对齐应让两端一致且不创建备份');
+      }
+      await fixtureGit('reset', '--keep', original);
+      await openAlignMenu();
+      await alignFromMenu(true);
       await window.webContents.executeJavaScript(`(async()=>{
         const wait=async (test,label,allowError=false)=>{
           for(let n=0;n<140;n++){
@@ -277,10 +310,8 @@ app.whenReady().then(async () => {
           }
           throw new Error(label+' 超时');
         };
-        document.querySelector('#git-align-remote').click();
-        await wait(()=>document.querySelector('.git-panel .success')?.textContent.includes('已对齐到远程分支')
-          && !document.querySelector('.workspace-bar select')?.disabled,'对齐远程');
         document.querySelector('.git-more summary').click();
+        if(document.querySelector('#git-keep-align-backup').checked)throw new Error('备份选项应在对齐后恢复默认');
         document.querySelector('#git-show-delete').click();
         await wait(()=>document.querySelector('#git-branch-to-delete'),'选择要删除的分支');
         const picker=document.querySelector('#git-branch-to-delete');
@@ -320,7 +351,7 @@ app.whenReady().then(async () => {
         throw new Error('Git 对齐或删除操作结果未通过验证');
       }
       evidence.checks = ['Vue 加载', 'preload 桥接', 'Node 隔离', '仓库选择与文件展示', '页面备注保存', '页面设置保存'];
-      evidence.git = { author: true, selectedCommit: true, branch: true, selectAll: true, commitHints: true, fileStatuses: true, align: true, deleteBranch: true, forceDeleteBranch: true };
+      evidence.git = { author: true, selectedCommit: true, branch: true, selectAll: true, commitHints: true, fileStatuses: true, align: true, optionalAlignBackup: true, deleteBranch: true, forceDeleteBranch: true };
       evidence.fontSizes = sizes;
       if (process.env.TCW_SMOKE_SERVER_URL) {
         evidence.collaboration = await require('./project-smoke.cjs').runProjectSmoke(window);
