@@ -7,6 +7,7 @@ const state = ref({ workspaces: [], notes: {}, gitBindings: {}, settings: { serv
 const current = ref(null), entries = ref([]), relative = ref(''), selected = ref(null), note = ref(''), savedNote = ref('');
 const repo = ref(null), busy = ref(false), error = ref(''), message = ref(''), ready = ref(false), serverUrl = ref(''), truncated = ref(false);
 const sharedBusy = ref(false);
+const workspaceView = ref('files'), gitVisited = ref(false), showClone = ref(false);
 const gitBusy = ref(false), authorId = ref(''), cloneAddress = ref(''), cloning = ref(false), cloneProgress = ref(null);
 const phases = { 'Enumerating objects': '列出对象', 'Counting objects': '统计对象', 'Compressing objects': '压缩对象',
   'Receiving objects': '接收对象', 'Resolving deltas': '处理差异', 'Updating files': '检出文件' };
@@ -34,6 +35,7 @@ function allowLeave() { return !changed.value || window.confirm('备注尚未保
 function resetWorkspace() {
   current.value = null; entries.value = []; relative.value = ''; selected.value = null;
   note.value = ''; savedNote.value = ''; repo.value = null; truncated.value = false;
+  workspaceView.value = 'files'; gitVisited.value = false; showClone.value = false;
 }
 async function reload() {
   const next = await api('bootstrap');
@@ -43,6 +45,10 @@ async function reload() {
 function switchPage(next) {
   if (busy.value || sharedBusy.value || gitBusy.value) return;
   page.value = next; error.value = ''; message.value = '';
+}
+function showGit() {
+  gitVisited.value = true;
+  workspaceView.value = 'git';
 }
 async function openAuthorSettings() {
   if (!active.value) return;
@@ -93,7 +99,7 @@ async function cloneWorkspace() {
     cloning.value = true; cloneProgress.value = null;
     try {
       imported = await api('cloneWorkspace', state.value.scope, cloneAddress.value);
-      if (imported) { cloneAddress.value = ''; await reload(); }
+      if (imported) { cloneAddress.value = ''; showClone.value = false; await reload(); }
     } finally { cloning.value = false; cloneProgress.value = null; }
   });
   if (imported) await switchWorkspace(imported.id);
@@ -141,47 +147,130 @@ window.addEventListener('beforeunload', event => { if (changed.value) { event.pr
 <template>
   <div class="shell" :data-ready="ready">
     <aside class="sidebar">
-      <div class="brand"><span class="logo">T</span><div>协作工作台<small>TEAMCODE WORKBENCH</small></div></div>
-      <div class="nav-label">工作空间</div>
-      <button :class="['nav', { active: page === 'workspace' }]" @click="switchPage('workspace')">▦ <span>本地工作区</span></button>
-      <button :class="['nav', { active: page === 'projects' }]" @click="switchPage('projects')">◷ <span>协作项目</span></button>
-      <div class="sidebar-bottom"><button :class="['nav', { active: page === 'settings' }]" @click="switchPage('settings')">⚙ <span>设置</span></button><div class="version">TCW <span>v{{ state.version || '0.4.1' }}</span></div></div>
+      <div class="brand"><span class="logo" aria-hidden="true">T</span><span>协作工作台</span></div>
+      <nav class="sidebar-nav" aria-label="主导航">
+        <button title="本地工作区" :class="['nav', { active: page === 'workspace' }]" :aria-current="page === 'workspace' ? 'page' : undefined" @click="switchPage('workspace')">▦ <span>本地工作区</span></button>
+        <button title="协作项目" :class="['nav', { active: page === 'projects' }]" :aria-current="page === 'projects' ? 'page' : undefined" @click="switchPage('projects')">◷ <span>协作项目</span></button>
+      </nav>
+      <div class="sidebar-bottom">
+        <button title="设置" :class="['nav', { active: page === 'settings' }]" :aria-current="page === 'settings' ? 'page' : undefined" @click="switchPage('settings')">⚙ <span>设置</span></button>
+        <div class="version">TCW <span>v{{ state.version || '0.4.2' }}</span></div>
+      </div>
     </aside>
     <main>
-      <header><div class="breadcrumb">协作工作台 <span>/</span> {{ page === 'workspace' ? '本地工作区' : page === 'settings' ? '设置' : '协作项目' }}</div><span class="badge">{{ state.user ? state.user.displayName : '离线工作区' }} · 0.4</span></header>
+      <header class="topbar">
+        <h1>{{ page === 'workspace' ? '本地工作区' : page === 'settings' ? '设置' : '协作项目' }}</h1>
+        <span class="account-status" role="status">{{ busy || sharedBusy || gitBusy ? '正在处理…' : state.user?.displayName || '离线模式' }}</span>
+      </header>
       <div class="content">
-        <div v-if="error" class="notice error" role="alert">{{ error }}</div><div v-if="message" class="notice success" role="status">{{ message }}</div>
+        <div v-if="error" class="notice error" role="alert">{{ error }}</div>
+        <div v-if="message" class="notice success" role="status">{{ message }}</div>
+
         <template v-if="page === 'workspace'">
-          <div class="page-heading"><div><h1>本地工作区</h1></div><button class="primary" :disabled="busy || gitBusy" @click="importWorkspace">＋ 导入 Git 仓库</button></div>
-          <form class="panel git-panel collab-form" @submit.prevent="cloneWorkspace">
-            <label for="clone-url">GitHub 仓库地址</label>
-            <input id="clone-url" v-model.trim="cloneAddress" placeholder="https://github.com/owner/repo" :disabled="busy || gitBusy" required>
-            <div class="button-line"><button :disabled="busy || gitBusy || !cloneAddress">选择目录并克隆</button><button v-if="cloning" type="button" @click="api('cancelClone')">取消克隆</button></div>
-            <p v-if="cloning" role="status">{{ phases[cloneProgress?.phase] || cloneProgress?.phase || '等待选择目录' }} {{ Number.isFinite(cloneProgress?.percent) ? cloneProgress.percent + '%' : '' }}</p>
-            <progress v-if="cloning && cloneProgress" max="100" :value="cloneProgress.percent ?? null"></progress>
-          </form>
-          <div class="stats"><div><small>已导入工作区</small><strong>{{ state.workspaces.length.toString().padStart(2, '0') }}</strong></div><div><small>当前分支</small><strong class="branch">{{ repo?.branch || '—' }}</strong></div><div><small>工作区状态</small><strong class="status">{{ repo ? repo.dirty ? '有未提交改动' : '工作区干净' : '等待选择仓库' }}</strong></div></div>
-          <div v-if="!state.workspaces.length" class="empty panel"><h2>还没有本地工作区</h2><p>克隆或导入仓库后可查看文件和改动。</p></div>
+          <section class="panel workspace-header" aria-label="当前仓库">
+            <div class="workspace-bar">
+              <div class="repo-picker">
+                <label for="workspace-picker">工作区</label>
+                <select v-if="state.workspaces.length" id="workspace-picker" :value="current || ''" :disabled="busy || gitBusy" @change="switchWorkspace($event.target.value)">
+                  <option value="" disabled>选择一个工作区</option>
+                  <option v-for="item in state.workspaces" :key="item.id" :value="item.id" :title="item.root">{{ item.name }} — {{ item.root }}</option>
+                </select>
+                <strong v-else>未导入仓库</strong>
+              </div>
+              <div class="button-line">
+                <button type="button" :aria-expanded="showClone" :disabled="busy || gitBusy" @click="showClone = !showClone">克隆 GitHub 仓库</button>
+                <button class="primary" :disabled="busy || gitBusy" @click="importWorkspace">＋ 导入 Git 仓库</button>
+              </div>
+            </div>
+            <form v-if="showClone || cloning" class="clone-form" @submit.prevent="cloneWorkspace">
+              <label for="clone-url">GitHub 仓库地址</label>
+              <div class="button-line">
+                <input id="clone-url" v-model.trim="cloneAddress" placeholder="https://github.com/owner/repo" :disabled="busy || gitBusy" required>
+                <button :disabled="busy || gitBusy || !cloneAddress">选择目录并克隆</button>
+                <button v-if="cloning" type="button" @click="api('cancelClone')">取消克隆</button>
+              </div>
+              <p v-if="cloning" role="status">{{ phases[cloneProgress?.phase] || cloneProgress?.phase || '等待选择目录' }} {{ Number.isFinite(cloneProgress?.percent) ? cloneProgress.percent + '%' : '' }}</p>
+              <progress v-if="cloning && cloneProgress" max="100" :value="cloneProgress.percent ?? null"></progress>
+            </form>
+            <div v-if="active" class="repository-meta">
+              <span class="root-path" :title="active.root">{{ active.root }}</span>
+              <span class="pill branch-pill" :title="repo?.branch">⑂ {{ repo?.branch || '读取分支…' }}</span>
+              <span :class="['pill', repo?.dirty ? 'pill-pending' : 'pill-clean']">{{ repo ? repo.dirty ? '有未提交改动' : '工作区干净' : '读取状态…' }}</span>
+            </div>
+          </section>
+          <div v-if="!active" class="panel empty">
+            <h2>{{ state.workspaces.length ? '选择要打开的工作区' : '添加你的第一个仓库' }}</h2>
+            <p>{{ state.workspaces.length ? '选择上方的仓库，查看文件、备注和 Git 改动。' : '从本机导入已有仓库，或输入 GitHub 地址克隆。' }}</p>
+          </div>
           <template v-else>
-            <div class="workspace-bar"><select aria-label="选择工作区" :value="current || ''" :disabled="busy || gitBusy" @change="switchWorkspace($event.target.value)"><option value="" disabled>选择一个工作区</option><option v-for="item in state.workspaces" :key="item.id" :value="item.id">{{ item.name }} — {{ item.root }}</option></select><button :disabled="!active || busy || gitBusy" @click="refresh">↻ 刷新</button></div>
-            <p v-if="active" class="root-path">{{ active.root }}</p>
-            <div v-if="active" class="explorer panel">
-              <section class="file-pane"><div class="pane-title"><h2>文件与目录</h2><span>按目录加载</span></div><div class="path-bar"><button :disabled="!relative || busy" @click="up">↑</button><span>{{ relative || '仓库根目录' }}</span></div>
-                <div class="file-list"><button v-for="entry in entries" :key="entry.path" :class="['file-row', { selected: selected?.path === entry.path }]" :disabled="busy" @click="select(entry)" @dblclick="entry.directory && openDirectory(entry)"><span class="file-icon">{{ entry.directory ? '▰' : '▤' }}</span><span class="file-name">{{ entry.name }}<small v-if="state.notes[current]?.[entry.path]">{{ state.notes[current][entry.path] }}</small></span><span v-if="entry.directory" class="open-folder" @click.stop="openDirectory(entry)" role="button" aria-label="打开目录">›</span></button><p v-if="!entries.length" class="muted">此目录为空，或目录加载失败。</p><p v-if="truncated" class="muted">目录较大，仅展示前 1000 项。</p></div>
+            <div class="section-bar">
+              <nav class="view-tabs" aria-label="工作区视图">
+                <button id="files-view" :aria-pressed="workspaceView === 'files'" :disabled="busy || gitBusy" @click="workspaceView = 'files'">文件与备注</button>
+                <button id="git-view" :aria-pressed="workspaceView === 'git'" :disabled="busy || gitBusy" @click="showGit">Git 操作</button>
+              </nav>
+              <button v-if="workspaceView === 'files'" :disabled="busy || gitBusy" @click="refresh">刷新文件</button>
+            </div>
+            <div v-show="workspaceView === 'files'" class="explorer panel">
+              <section class="file-pane">
+                <div class="pane-title"><h2>文件与目录</h2><span>{{ entries.length }} 项</span></div>
+                <div class="path-bar"><button type="button" aria-label="返回上一级" :disabled="!relative || busy" @click="up">↑</button><span>{{ relative || '仓库根目录' }}</span></div>
+                <div class="file-list">
+                  <div v-for="entry in entries" :key="entry.path" class="file-entry">
+                    <button :class="['file-row', { selected: selected?.path === entry.path }]" :disabled="busy" @click="select(entry)" @dblclick="entry.directory && openDirectory(entry)">
+                      <span class="file-icon" aria-hidden="true">{{ entry.directory ? '▰' : '▤' }}</span>
+                      <span class="file-name">{{ entry.name }}<small v-if="state.notes[current]?.[entry.path]">{{ state.notes[current][entry.path] }}</small></span>
+                    </button>
+                    <button v-if="entry.directory" class="open-folder" type="button" :disabled="busy" :aria-label="'打开 ' + entry.name" @click="openDirectory(entry)">›</button>
+                  </div>
+                  <p v-if="!entries.length" class="muted">此目录没有可显示的文件。</p>
+                  <p v-if="truncated" class="muted">仅展示前 1000 项。</p>
+                </div>
               </section>
-              <section class="note-pane"><div class="pane-title"><h2>个人备注</h2><span class="local-tag">仅本机</span></div><template v-if="selected"><div class="selected-path">{{ selected.path }}</div><p>记录用途、阅读思路或待办，不会写入仓库。</p><textarea aria-label="个人备注" v-model="note" maxlength="4000" placeholder="例如：这里负责登录校验，修改前先确认接口字段…"></textarea><div class="note-footer"><small>{{ note.length }}/4000 {{ changed ? '· 尚未保存' : '' }}</small><button class="primary" :disabled="busy || !changed" @click="saveNote">保存备注</button></div></template><div v-else class="note-empty">选择左侧文件或目录<br><small>为它留下一条个人备注</small></div></section>
-            </div><div v-else class="panel muted">请先从上方选择工作区。</div>
+              <section class="note-pane">
+                <div class="pane-title"><h2>个人备注</h2><span class="local-tag">仅本机</span></div>
+                <div v-if="selected" class="note-editor">
+                  <div class="selected-path">{{ selected.path }}</div>
+                  <textarea aria-label="个人备注" v-model="note" maxlength="4000" placeholder="记录文件用途或修改前要确认的事项"></textarea>
+                  <div class="note-footer"><small>{{ note.length }}/4000 {{ changed ? '· 尚未保存' : '' }}</small><button class="primary" :disabled="busy || !changed" @click="saveNote">保存备注</button></div>
+                </div>
+                <div v-else class="note-empty"><strong>选择一个文件或目录</strong><p>备注会保存在此工作区。</p></div>
+              </section>
+            </div>
+            <GitPanel v-if="gitVisited" v-show="workspaceView === 'git'" :key="active.id" :workspace="active" :scope="state.scope" :api="api" @pending="gitBusy = $event" @changed="updateFromGit" @configure-author="openAuthorSettings" />
           </template>
-          <GitPanel v-if="active" :key="active.id" :workspace="active" :scope="state.scope" :api="api" @pending="gitBusy = $event" @changed="updateFromGit" @configure-author="openAuthorSettings" />
-          <div class="hint">ⓘ 备注按工作区与相对路径保存。文件移动或改名后，旧备注保留，新路径需重新填写。</div>
         </template>
-        <template v-if="page === 'settings'"><div class="page-heading"><div><h1>设置</h1><p>连接共享服务并查看本机数据位置。</p></div></div><section class="panel settings"><h2>协作服务地址</h2><p>同一台电脑试用时填写 http://localhost:8080。更换地址会退出当前账号；连接其他电脑时请使用 HTTPS。</p><label for="server">服务地址</label><input id="server" v-model="serverUrl" placeholder="http://localhost:8080"><div class="button-line"><button class="primary" :disabled="busy" @click="saveAddress">保存设置</button><button :disabled="busy" @click="checkAddress">测试连接</button></div><hr><h2>本地数据</h2><p>工作区和备注仅保存在本机。离线数据（含 0.1 备注）与各协作账号的本机数据分开；退出即可回到原离线工作区。</p><code>{{ state.dataPath }}</code><p>关闭窗口即退出。下次启动协作项目时需要重新登录。</p></section></template>
+
         <template v-if="page === 'settings'">
-          <div class="panel settings"><label for="author-workspace">配置 Git 作者的仓库</label><select id="author-workspace" :value="authorWorkspace?.id || ''" :disabled="gitBusy" @change="authorId = $event.target.value"><option value="" disabled>选择已导入的工作区</option><option v-for="item in state.workspaces" :key="item.id" :value="item.id">{{ item.name }} — {{ item.root }}</option></select></div>
-          <GitPanel v-if="authorWorkspace" :key="authorWorkspace.id" :workspace="authorWorkspace" :scope="state.scope" :api="api" author-only @pending="gitBusy = $event" />
+          <div class="settings-layout">
+            <section class="panel settings service-settings">
+              <h2>协作服务</h2>
+              <p>本机试用地址为 http://localhost:8080。更换地址会退出当前协作账号。</p>
+              <form class="collab-form" @submit.prevent="saveAddress">
+                <label for="server">服务地址</label>
+                <input id="server" v-model="serverUrl" placeholder="http://localhost:8080">
+                <div class="button-line"><button class="primary" :disabled="busy">保存设置</button><button type="button" :disabled="busy" @click="checkAddress">测试连接</button></div>
+              </form>
+            </section>
+            <section id="git-author-settings" class="panel settings author-settings">
+              <h2>仓库 Git 作者</h2>
+              <div class="collab-form">
+                <label for="author-workspace">工作区</label>
+                <select id="author-workspace" :value="authorWorkspace?.id || ''" :disabled="gitBusy" @change="authorId = $event.target.value">
+                  <option value="" disabled>选择已导入的工作区</option>
+                  <option v-for="item in state.workspaces" :key="item.id" :value="item.id" :title="item.root">{{ item.name }}</option>
+                </select>
+              </div>
+              <GitPanel v-if="authorWorkspace" :key="authorWorkspace.id" :workspace="authorWorkspace" :scope="state.scope" :api="api" author-only @pending="gitBusy = $event" />
+              <p v-else>请选择工作区，再配置此仓库的提交姓名和邮箱。</p>
+            </section>
+            <section class="panel settings local-settings">
+              <h2>本地数据</h2>
+              <p>备注、工作区和分支关联按当前协作账号保存在本机。退出登录可返回离线工作区。</p>
+              <code>{{ state.dataPath }}</code>
+            </section>
+          </div>
         </template>
         <Projects v-if="page === 'projects'" :user="state.user" :server-url="state.settings.serverUrl" :api="api" :sync-session="reload" :allow-switch="allowLeave" :scope="state.scope" :workspaces="state.workspaces" :git-bindings="state.gitBindings" :bind-git="bindGit" @pending="sharedBusy = $event" />
-        <footer><span>协作工作台</span><span>{{ busy || sharedBusy ? '正在处理…' : state.user ? '已登录' : '离线模式' }}</span></footer>
       </div>
     </main>
   </div>

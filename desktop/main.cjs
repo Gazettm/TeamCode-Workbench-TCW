@@ -143,6 +143,28 @@ app.whenReady().then(async () => {
       if (sizes.name !== '16px' || sizes.note !== '16px' || sizes.editor !== '16px') throw new Error('文件名或备注字号不符合 0.2 界面预期');
       await fs.mkdir('test-results', { recursive: true });
       await fs.writeFile('test-results/desktop.png', (await window.webContents.capturePage()).toPNG());
+      const layouts = {};
+      async function captureLayout(name, selector) {
+        layouts[name] = {};
+        for (const [size, width, height] of [['wide', 1280, 800], ['compact', 960, 640]]) {
+          window.setContentSize(width, height);
+          const metrics = await window.webContents.executeJavaScript(`(async()=>{
+            const target=document.querySelector(${JSON.stringify(selector)});
+            if(!target || !target.getClientRects().length)throw new Error('布局测试目标不可见');
+            for(let n=0;n<90 && Math.abs(innerWidth-${width})>8;n++)await new Promise(resolve=>setTimeout(resolve,50));
+            window.scrollTo(0,0);
+            await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+            return {width:innerWidth,height:innerHeight,documentWidth:document.documentElement.scrollWidth,columns:getComputedStyle(target).gridTemplateColumns};
+          })()`);
+          if (Math.abs(metrics.width - width) > 8 || metrics.documentWidth > metrics.width + 1) {
+            throw new Error('页面布局超出窗口 ' + name + ' ' + size + ' ' + JSON.stringify(metrics));
+          }
+          layouts[name][size] = metrics;
+          await fs.writeFile('test-results/042-' + name + '-' + size + '.png', (await window.webContents.capturePage()).toPNG());
+        }
+        window.setContentSize(1280, 800);
+      }
+      await captureLayout('files', '.explorer');
       evidence.text = await window.webContents.executeJavaScript('document.body.innerText');
       await window.webContents.executeJavaScript(`(async()=>{
         document.querySelectorAll('.sidebar-bottom .nav')[0].click();
@@ -152,19 +174,39 @@ app.whenReady().then(async () => {
         for(let i=0;i<100;i++){if(document.querySelector('.success')?.textContent.includes('设置已保存'))return;await new Promise(r=>setTimeout(r,50))}throw new Error('设置保存失败');
       })()`);
       if ((await store.read()).settings.serverUrl !== testService) throw new Error('设置未持久化');
+      await captureLayout('settings', '.settings-layout');
+      await window.webContents.executeJavaScript(`(async()=>{
+        const nav=document.querySelector('.sidebar .nav');
+        for(let i=0;i<120;i++){
+          const tab=document.querySelector('#git-view');
+          if(tab&&!tab.disabled){tab.click();break}
+          if(!tab)nav.click();
+          await new Promise(r=>setTimeout(r,50));
+        }
+        for(let i=0;i<120;i++){
+          const file=document.querySelector('.git-files .diff-choice');
+          if(file&&!file.matches(':disabled')){file.click();break}
+          await new Promise(r=>setTimeout(r,50));
+        }
+        for(let i=0;i<120;i++){
+          if(document.querySelector('.diff-panel pre')?.textContent.includes('TCW smoke fixture'))return;
+          await new Promise(r=>setTimeout(r,50));
+        }
+        throw new Error('Git 文件预览未显示');
+      })()`);
+      await captureLayout('git', '.git-review-layout');
       await window.webContents.executeJavaScript(`(async()=>{
         const wait = async (test, label) => {
           for (let n=0;n<140;n++) {
             if (test()) return;
-            const error=document.querySelector('.git-panel .error');
+            const error=document.querySelector('.git-panel .error, .git-author-editor .error');
             if(error)throw new Error(label+': '+error.textContent);
             await new Promise(resolve=>setTimeout(resolve,50));
           }
           throw new Error(label+' 超时');
         };
         const edit=(input,value)=>{input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}))};
-        const button=(label)=>[...document.querySelectorAll('.git-panel button')].find(b=>b.textContent.trim()===label);
-        document.querySelector('.sidebar .nav').click();
+        const button=(label)=>[...document.querySelectorAll('.git-panel button, .git-author-editor button')].find(b=>b.textContent.trim()===label);
         await wait(()=>button('全选')&&!button('全选').matches(':disabled'),'加载改动列表');
         if(document.querySelectorAll('.git-file-state[title="??"]').length!==2
           || document.querySelector('.git-file-state[title="??"]').textContent!=='未跟踪') throw new Error('未跟踪文件标签不正确');
@@ -179,21 +221,22 @@ app.whenReady().then(async () => {
         edit(document.querySelector('#author-email'),'tcw@example.test');
         await wait(()=>button('保存 Git 作者')&&!button('保存 Git 作者').disabled,'保存 Git 作者按钮');
         button('保存 Git 作者').click();
-        await wait(()=>document.querySelector('.git-panel .success') && !button('保存 Git 作者').disabled,'保存 Git 作者');
+        await wait(()=>document.querySelector('.git-author-editor .success') && !button('保存 Git 作者').disabled,'保存 Git 作者');
         document.querySelector('.sidebar .nav').click();
         await wait(()=>button('全选')&&!button('全选').matches(':disabled'),'加载 Git 改动');
         button('全选').click();
         await wait(()=>button('提交选中的 2 个文件'),'重新全选');
         if(!button('提交选中的 2 个文件').matches(':disabled') || !document.querySelector('#git-commit-hint')?.textContent.includes('填写提交说明')) throw new Error('缺少提交说明提示');
-        edit(document.querySelector('#commit-message'),'0.4.1 桌面提交验证');
+        edit(document.querySelector('#commit-message'),'0.4.2 桌面提交验证');
         await wait(()=>!button('提交选中的 2 个文件').matches(':disabled'),'选择提交');
         button('提交选中的 2 个文件').click();
         await wait(()=>document.querySelector('.git-panel .success')?.textContent.includes('已创建'),'提交成功');
+        document.querySelector('.branch-tools summary').click();
         const branch=document.querySelector('.git-controls input');
         edit(branch,'task/smoke');
         await wait(()=>!button('从当前提交创建').disabled,'创建分支按钮');
         button('从当前提交创建').click();
-        await wait(()=>document.querySelector('.git-panel strong')?.textContent==='task/smoke'
+        await wait(()=>document.querySelector('#git-current-branch')?.textContent==='task/smoke'
           && !document.querySelector('.workspace-bar select')?.disabled,'切换到新分支');
       })()`);
       evidence.checks = ['Vue 加载', 'preload 桥接', 'Node 隔离', '仓库选择与文件展示', '页面备注保存', '页面设置保存'];
@@ -201,7 +244,9 @@ app.whenReady().then(async () => {
       evidence.fontSizes = sizes;
       if (process.env.TCW_SMOKE_SERVER_URL) {
         evidence.collaboration = await require('./project-smoke.cjs').runProjectSmoke(window);
+        await captureLayout('tasks', '.task-layout');
       }
+      evidence.layouts = layouts;
       await fs.writeFile('test-results/smoke.json', JSON.stringify(evidence, null, 2));
       console.log('Electron smoke PASS: Vue 页面已加载、受限桥接可用、页面无 Node 权限');
       app.exit(0);

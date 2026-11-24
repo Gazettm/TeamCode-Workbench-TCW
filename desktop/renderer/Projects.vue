@@ -12,6 +12,10 @@ const username = ref(''), displayName = ref(''), password = ref('');
 const projects = ref([]), projectId = ref(null), members = ref([]), invitations = ref([]);
 const newName = ref(''), inviteCode = ref(''), validHours = ref(24), issued = ref(null);
 const busy = ref(false), error = ref(''), message = ref('');
+const taskBusy = ref(false), view = ref('tasks'), projectForm = ref(null);
+const pending = computed(() => busy.value || taskBusy.value);
+const views = { tasks: '任务', members: '成员与仓库', activity: '动态' };
+watch(pending, value => emit('pending', value));
 const active = computed(() => projects.value.find(item => item.id === projectId.value));
 const binding = computed(() => props.gitBindings[projectId.value]);
 const boundWorkspace = computed(() => props.workspaces.find(item => item.id === binding.value?.workspaceId));
@@ -21,12 +25,13 @@ const call = (operation, data) => props.api('collaborate', operation, data);
 
 function clearProjects() {
   projects.value = []; projectId.value = null; members.value = []; invitations.value = []; issued.value = null;
+  taskBusy.value = false; view.value = 'tasks'; projectForm.value = null;
 }
 watch(() => props.user?.id, value => { if (!value) clearProjects(); });
 
 async function run(action) {
   if (busy.value) return;
-  busy.value = true; emit('pending', true); error.value = ''; message.value = '';
+  busy.value = true; error.value = ''; message.value = '';
   try { await action(); }
   catch (failure) {
     error.value = failure.message;
@@ -34,11 +39,11 @@ async function run(action) {
       clearProjects();
       try { await props.syncSession(); } catch (stateError) { error.value += ' ' + stateError.message; }
     }
-  } finally { busy.value = false; emit('pending', false); }
+  } finally { busy.value = false; }
 }
 
 async function openProject(id) {
-  if (projectId.value !== id) issued.value = null;
+  if (projectId.value !== id) { issued.value = null; view.value = 'tasks'; }
   projectId.value = id; members.value = []; invitations.value = [];
   if (!id || !active.value) return;
   members.value = await call('members', { projectId: id });
@@ -76,12 +81,14 @@ function signOut() {
 const create = () => run(async () => {
   const project = await call('createProject', { name: newName.value });
   newName.value = '';
+  projectForm.value = null;
   await refresh(project.id);
   message.value = '已创建私有项目。';
 });
 const join = () => run(async () => {
   const project = await call('join', { code: inviteCode.value });
   inviteCode.value = '';
+  projectForm.value = null;
   await refresh(project.id);
   message.value = '已进入项目。';
 });
@@ -112,15 +119,11 @@ onMounted(() => { if (props.user) run(() => refresh()); });
 
 <template>
   <div class="collab">
-    <div class="page-heading">
-      <div><h1>协作项目</h1><p>{{ user ? '切换项目、查看成员或邀请组员加入。' : '登录同一个协作服务后，才能访问团队项目。' }}</p></div>
-      <button v-if="user" :disabled="busy" @click="signOut">退出登录</button>
-    </div>
     <div v-if="error" class="notice error" role="alert">{{ error }}</div>
     <div v-if="message" class="notice success" role="status">{{ message }}</div>
     <section v-if="!user" class="panel login-panel">
-      <h2>{{ mode === 'login' ? '登录' : '注册' }}</h2>
-      <p class="endpoint">{{ serverUrl }}</p>
+      <h2>{{ mode === 'login' ? '登录协作账号' : '注册协作账号' }}</h2>
+      <p class="endpoint">协作服务 · {{ serverUrl }}</p>
       <form class="collab-form" @submit.prevent="authenticate">
         <label for="account-name">账号</label>
         <input id="account-name" v-model="username" required maxlength="32" autocomplete="username" placeholder="3–32 位英文、数字、点、下划线或短横线">
@@ -138,33 +141,47 @@ onMounted(() => { if (props.user) run(() => refresh()); });
       <p>协作账号与 GitHub 账号独立。离线时仍可使用本地工作区。</p>
     </section>
     <template v-else>
-      <div class="workspace-bar identity-line">
+      <div class="identity-line panel">
         <div><strong>{{ user.displayName }}</strong> <span>· @{{ user.username }}</span></div>
-        <button :disabled="busy" @click="run(() => refresh())">刷新项目与成员</button>
+        <div class="button-line"><button :disabled="pending" @click="run(() => refresh())">刷新项目与成员</button>
+          <button :disabled="pending" @click="signOut">退出登录</button></div>
       </div>
       <div class="project-grid">
         <section class="panel project-list">
           <h2>我的私有项目</h2>
           <p v-if="!projects.length">暂无项目。可自行创建，或使用组长发给你的邀请码。</p>
-          <button v-for="project in projects" :key="project.id" type="button" :class="['project-choice', { 'current-project': project.id === projectId }]" :disabled="busy" @click="run(() => openProject(project.id))">
-            <span>{{ project.name }}</span><small>{{ roleLabel(project.role) }}</small>
-          </button>
-          <form class="collab-form" @submit.prevent="create">
-            <label for="new-project">创建私有项目</label>
+          <div v-else class="project-choices">
+            <button v-for="project in projects" :key="project.id" type="button" :class="['project-choice', { 'current-project': project.id === projectId }]" :aria-pressed="project.id === projectId" :disabled="pending" @click="run(() => openProject(project.id))">
+              <span>{{ project.name }}</span><small>{{ roleLabel(project.role) }}</small>
+            </button>
+          </div>
+          <div class="button-line project-actions">
+            <button id="show-create-project" :aria-expanded="projectForm === 'create'" :disabled="pending" @click="projectForm = projectForm === 'create' ? null : 'create'">新建项目</button>
+            <button id="show-join-project" :aria-expanded="projectForm === 'join'" :disabled="pending" @click="projectForm = projectForm === 'join' ? null : 'join'">使用邀请码</button>
+          </div>
+          <form v-if="projectForm === 'create'" class="collab-form" @submit.prevent="create">
+            <label for="new-project">项目名称</label>
             <input id="new-project" v-model.trim="newName" required maxlength="80" placeholder="项目名称">
-            <button type="submit" class="primary" :disabled="busy">创建项目</button>
+            <button type="submit" class="primary" :disabled="pending">创建项目</button>
           </form>
-          <form class="collab-form" @submit.prevent="join">
-            <label for="join-code">使用邀请码加入</label>
+          <form v-if="projectForm === 'join'" class="collab-form" @submit.prevent="join">
+            <label for="join-code">邀请码</label>
             <input id="join-code" v-model.trim="inviteCode" required maxlength="128" placeholder="粘贴组长提供的邀请码">
-            <button type="submit" :disabled="busy">加入项目</button>
+            <button type="submit" class="primary" :disabled="pending">加入项目</button>
           </form>
         </section>
-        <section v-if="active" class="panel project-detail">
-          <div class="project-title"><h2>{{ active.name }}</h2><span class="badge">{{ roleLabel(active.role) }}</span></div>
+        <section v-if="active" class="project-detail">
+          <div class="project-header panel">
+            <div class="project-title"><h2>{{ active.name }}</h2><span class="badge">{{ roleLabel(active.role) }}</span></div>
+            <nav class="view-tabs" aria-label="项目视图">
+              <button v-for="(label, key) in views" :id="'project-' + key + '-view'" :key="key" :aria-pressed="view === key" :disabled="pending" @click="view = key">{{ label }}</button>
+            </nav>
+          </div>
+          <section v-if="view === 'members'" class="panel project-members">
+          <h3>本机仓库</h3>
           <div class="collab-form">
-            <label for="project-repo">本机项目仓库</label>
-            <select id="project-repo" :value="binding?.workspaceId || ''" :disabled="busy" @change="bindWorkspace($event.target.value, $event.target)">
+            <label for="project-repo">工作区</label>
+            <select id="project-repo" :value="binding?.workspaceId || ''" :disabled="pending" @change="bindWorkspace($event.target.value, $event.target)">
               <option value="">尚未绑定</option><option v-for="item in workspaces" :key="item.id" :value="item.id">{{ item.name }} — {{ item.root }}</option>
             </select>
             <p v-if="!workspaces.length" class="hint">请先在当前账号的本地工作区克隆或导入仓库。</p>
@@ -195,10 +212,11 @@ onMounted(() => { if (props.user) run(() => refresh()); });
               </li>
             </ul>
           </template>
+          </section>
+          <Tasks v-if="active" v-show="view !== 'members'" :key="active.id" :view="view" :project="active" :user="user" :members="members" :api="api" :scope="scope" :workspace="boundWorkspace" :branches="binding?.branches" :bind-git="bindGit" @pending="taskBusy = $event" @expired="async()=>{clearProjects();await syncSession()}" />
         </section>
-        <section v-else class="panel"><p>创建、加入或选择一个项目后，即可查看成员。</p></section>
+        <section v-else class="panel empty"><h2>选择或加入项目</h2><p>在左侧创建新项目，或者使用组长发给你的邀请码。</p></section>
       </div>
-      <Tasks v-if="active" :key="active.id" :project="active" :user="user" :members="members" :api="api" :scope="scope" :workspace="boundWorkspace" :branches="binding?.branches" :bind-git="bindGit" @pending="value=>{busy=value;emit('pending',value)}" @expired="async()=>{clearProjects();await syncSession()}" />
     </template>
   </div>
 </template>

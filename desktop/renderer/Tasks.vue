@@ -1,13 +1,15 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue';
-const props=defineProps({project:Object,user:Object,members:Array,api:Function,scope:String,workspace:Object,branches:Object,bindGit:Function});
-const emit=defineEmits(['pending','expired','members-changed']);
+const props=defineProps({project:Object,user:Object,members:Array,api:Function,scope:String,workspace:Object,branches:Object,bindGit:Function,view:String});
+const emit=defineEmits(['pending','expired']);
 const tasks=ref([]), activities=ref([]), selected=ref(null), rounds=ref([]);
 const busy=ref(false), error=ref(''), message=ref('');
 const title=ref(''), description=ref(''), assignee=ref(''), due=ref('');
 const text=ref(''), member=ref(''), revisedDue=ref('');
+const filter=ref('all'), showCreate=ref(false);
 const owner=computed(()=>props.project.role==='OWNER');
 const labels={OPEN:'待领取',ASSIGNED:'已指派',IN_PROGRESS:'进行中',IN_REVIEW:'待验收',DONE:'已完成',CANCELED:'已取消'};
+const visibleTasks=computed(()=>filter.value==='all' ? tasks.value : tasks.value.filter(task=>task.status===filter.value));
 const events={PUBLISHED:'发布',CLAIM:'领取',START:'开始',SUBMIT:'提交验收',DELEGATE:'委派复核',REVOKE_REVIEW:'撤回复核',REVIEW:'复核意见',ACCEPT:'验收通过',RETURN:'退回',ASSIGN:'调整负责人',DEADLINE:'调整截止',CANCEL:'取消',MEMBER_REMOVED:'移除成员'};
 const confirmations={accept:'验收通过',return:'退回',assign:'重新指派',deadline:'调整截止',cancel:'取消任务',delegate:'委派复核','revoke-review':'撤回复核委派'};
 const name=id=>props.members.find(m=>m.id===id)?.displayName || (id?'历史成员':'未指派');
@@ -16,6 +18,7 @@ const mine=computed(()=>selected.value?.assigneeId===props.user.id);
 const pendingRound=computed(()=>selected.value?.status==='IN_REVIEW' && rounds.value[0]?.roundNo===selected.value.roundNo ? rounds.value[0] : null);
 const reviewerOptions=computed(()=>props.members.filter(m=>m.id!==props.user.id && m.id!==selected.value?.assigneeId));
 const waitingForOpinion=computed(()=>Boolean(pendingRound.value?.reviewerId && !pendingRound.value.opinion));
+const canReview=computed(()=>!owner.value && !mine.value && pendingRound.value?.reviewerId===props.user.id && !pendingRound.value.opinion);
 const terminal=computed(()=>['DONE','CANCELED'].includes(selected.value?.status));
 const gitInfo=ref(null), gitBranch=ref('');
 const taskBranch=computed(()=>props.branches?.[selected.value?.id]);
@@ -77,7 +80,7 @@ const choose=t=>run(async()=>{
 });
 const create=()=>run(async()=>{
  const result=await call('createTask',{title:title.value,description:description.value,assigneeId:assignee.value||null,dueAt:due.value?new Date(due.value).toISOString():null});
- title.value='';description.value='';due.value='';selected.value=result;
+ title.value='';description.value='';due.value='';selected.value=result;showCreate.value=false;filter.value='all';
  await load();message.value='任务已发布。';
 });
 async function action(kind) {
@@ -101,33 +104,45 @@ watch(()=>props.workspace?.id,()=>{gitBranch.value='';checkGit();});
 
 <template>
 <section class="task-area">
- <div class="task-heading"><h2>任务看板</h2><button :disabled="busy" @click="run(load)">刷新任务与动态</button></div>
+ <div class="task-heading section-bar">
+  <h2>{{ view === 'activity' ? '项目动态' : '任务看板' }}</h2>
+  <div class="button-line"><button :disabled="busy" @click="run(load)">刷新任务与动态</button>
+   <button v-if="owner && view === 'tasks'" id="show-create-task" class="primary" :aria-expanded="showCreate" :disabled="busy" @click="showCreate = !showCreate">{{ showCreate ? '收起发布表单' : '新建任务' }}</button></div>
+ </div>
  <div v-if="error" class="notice error" role="alert">{{error}}</div><div v-if="message" class="notice success" role="status">{{message}}</div>
- <form v-if="owner" class="panel collab-form task-create" @submit.prevent="create">
+ <template v-if="view === 'tasks'">
+ <form v-if="owner && showCreate" class="panel collab-form task-create" @submit.prevent="create">
   <h3>发布任务</h3><label for="task-title">标题</label><input id="task-title" v-model="title" required maxlength="120">
   <label for="task-description">说明</label><textarea id="task-description" v-model="description" maxlength="8000"></textarea>
   <div class="task-fields"><label>负责人<select v-model="assignee"><option value="">开放领取</option><option v-for="m in members" :key="m.id" :value="m.id">{{m.displayName}}</option></select></label>
   <label>截止时间（本机时区，可选）<input v-model="due" type="datetime-local"></label></div>
   <button type="submit" class="primary" :disabled="busy">发布任务</button>
  </form>
- <div class="kanban"><section v-for="(label,status) in labels" :key="status" class="kanban-column"><h3>{{label}} <small>{{tasks.filter(t=>t.status===status).length}}</small></h3>
-  <button v-for="t in tasks.filter(t=>t.status===status)" :key="t.id" :class="['task-card',{chosen:selected?.id===t.id}]" :disabled="busy" @click="choose(t)">
-   <strong>{{t.title}}</strong><span>{{name(t.assigneeId)}}</span><small :class="{overdue:t.overdue}">{{t.overdue?'已逾期 · ':''}}{{format(t.dueAt)}}</small>
-  </button><p v-if="!tasks.some(t=>t.status===status)">暂无任务</p>
- </section></div>
- <p class="hint">最多展示最近 500 个任务。任务状态不会自动改变 Git 或远程合并状态；更新后请手动刷新。</p>
+ <div class="task-layout">
+ <section class="panel task-list">
+  <div class="task-heading"><h3>任务列表</h3><span class="pill">{{visibleTasks.length}} 项</span></div>
+  <label for="task-status-filter">按状态查看</label>
+  <select id="task-status-filter" v-model="filter" :disabled="busy"><option value="all">全部状态</option><option v-for="(label,status) in labels" :key="status" :value="status">{{label}}</option></select>
+  <div class="task-choices">
+   <button v-for="task in visibleTasks" :key="task.id" :class="['task-card',{chosen:selected?.id===task.id}]" :aria-pressed="selected?.id===task.id" :disabled="busy" @click="choose(task)">
+    <span class="task-card-heading"><strong>{{task.title}}</strong><span :class="['badge', 'task-state-'+task.status]">{{labels[task.status]}}</span></span>
+    <span class="task-card-meta">{{name(task.assigneeId)}} <small v-if="task.overdue" class="overdue">已逾期</small><small v-else-if="task.dueAt">{{format(task.dueAt)}}</small></span>
+   </button>
+   <p v-if="!visibleTasks.length" class="muted">{{filter === 'all' ? '暂无任务' : '没有符合此状态的任务'}}</p>
+  </div>
+  <p v-if="tasks.length === 500" class="hint">仅显示最近 500 个任务。</p>
+ </section>
  <section v-if="selected" class="panel task-detail">
-  <div class="task-heading"><h2>{{selected.title}}</h2><span class="badge">{{labels[selected.status]}}</span></div>
+  <div class="task-heading"><h2>{{selected.title}}</h2><span :class="['badge', 'task-state-'+selected.status]">{{labels[selected.status]}}</span></div>
   <p class="task-description">{{selected.description||'暂无说明'}}</p><p>负责人：{{name(selected.assigneeId)}} · {{format(selected.dueAt)}} <span v-if="selected.overdue" class="overdue">已逾期</span></p>
   <div class="button-line">
    <button v-if="selected.status==='OPEN'" class="primary" :disabled="busy" @click="action('claim')">领取任务</button>
    <button v-if="mine && selected.status==='ASSIGNED'" class="primary" :disabled="busy" @click="action('start')">开始工作</button>
   </div>
   <div v-if="!terminal" class="collab-form">
-   <label for="task-operation-text">成果说明、复核意见或调整原因</label><textarea id="task-operation-text" v-model="text" maxlength="8000" placeholder="提交验收和复核时填写说明；退回、调整或取消时须写原因。"></textarea>
    <section v-if="mine && ['ASSIGNED','IN_PROGRESS'].includes(selected.status)" class="task-git">
     <h3>任务分支</h3>
-    <p v-if="!workspace" class="hint">在项目成员区域选择本机项目仓库后，可关联任务分支。</p>
+    <p v-if="!workspace" class="hint">在「成员与仓库」选择工作区后，可关联任务分支。</p>
     <template v-else>
      <p class="hint">{{ workspace.name }} · {{ taskBranch || '尚未关联分支' }}<span v-if="gitInfo?.branch"> · 当前 {{ gitInfo.branch }}</span></p>
      <div v-if="gitInfo" class="git-controls">
@@ -139,9 +154,13 @@ watch(()=>props.workspace?.id,()=>{gitBranch.value='';checkGit();});
     </template>
     <p v-if="selected.status==='IN_PROGRESS' && gitWarning()" class="hint">{{ gitWarning() }}</p>
    </section>
+   <template v-if="owner || canReview || (mine && selected.status==='IN_PROGRESS')">
+    <label for="task-operation-text">{{ canReview ? '复核意见' : mine && selected.status==='IN_PROGRESS' ? '成果说明或调整原因' : '任务调整或退回原因' }}</label>
+    <textarea id="task-operation-text" v-model="text" maxlength="8000"></textarea>
+   </template>
    <div class="button-line">
     <button v-if="mine && selected.status==='IN_PROGRESS'" class="primary" :disabled="busy||!text.trim()" @click="action('submit')">提交验收</button>
-    <button v-if="!owner && !mine && pendingRound?.reviewerId===user.id && !pendingRound.opinion" :disabled="busy||!text.trim()" @click="action('review')">保存复核意见</button>
+    <button v-if="canReview" :disabled="busy||!text.trim()" @click="action('review')">保存复核意见</button>
     <template v-if="owner && selected.status==='IN_REVIEW'"><button class="primary" :disabled="busy||!pendingRound||waitingForOpinion" @click="action('accept')">验收通过</button><button :disabled="busy||!pendingRound||waitingForOpinion||!text.trim()" @click="action('return')">退回</button></template>
    </div>
    <template v-if="owner">
@@ -171,7 +190,10 @@ watch(()=>props.workspace?.id,()=>{gitBranch.value='';checkGit();});
    <p v-if="round.reason">结论：{{round.reason}} · {{name(round.decidedBy)}}</p>
   </article><p v-if="!rounds.length">尚未提交验收。</p>
  </section>
- <section class="panel activity-list"><h2>项目动态</h2>
+ <section v-else class="panel empty task-empty"><h2>选择一个任务</h2><p>查看说明、任务分支和验收记录。</p></section>
+ </div>
+ </template>
+ <section v-else-if="view === 'activity'" class="panel activity-list" aria-label="项目动态">
   <article v-for="a in activities" :key="a.id"><strong>{{a.actorName}} · {{events[a.kind]||a.kind}}</strong><p class="task-description">{{a.detail}}</p><small>{{format(a.occurredAt)}}</small></article>
   <p v-if="!activities.length">暂无任务动态。</p>
   <button v-if="activities.length>=100" :disabled="busy" @click="run(async()=>{const older=await call('activities',{before:activities[activities.length-1].id});activities.push(...older)})">加载更早动态</button>
