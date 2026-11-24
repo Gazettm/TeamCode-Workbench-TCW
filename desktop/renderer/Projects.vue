@@ -1,8 +1,10 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue';
+import Tasks from './Tasks.vue';
 
 const props = defineProps({
-  user: Object, serverUrl: String, api: Function, syncSession: Function, allowSwitch: Function
+  user: Object, serverUrl: String, api: Function, syncSession: Function, allowSwitch: Function,
+  scope: String, workspaces: Array, gitBindings: Object, bindGit: Function
 });
 const emit = defineEmits(['pending']);
 const mode = ref('login');
@@ -11,6 +13,8 @@ const projects = ref([]), projectId = ref(null), members = ref([]), invitations 
 const newName = ref(''), inviteCode = ref(''), validHours = ref(24), issued = ref(null);
 const busy = ref(false), error = ref(''), message = ref('');
 const active = computed(() => projects.value.find(item => item.id === projectId.value));
+const binding = computed(() => props.gitBindings[projectId.value]);
+const boundWorkspace = computed(() => props.workspaces.find(item => item.id === binding.value?.workspaceId));
 const roleLabel = role => role === 'OWNER' ? '组长' : '组员';
 const date = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '';
 const call = (operation, data) => props.api('collaborate', operation, data);
@@ -85,6 +89,18 @@ const issue = () => run(async () => {
   issued.value = await call('issue', { projectId: projectId.value, validHours: Number(validHours.value) });
   invitations.value = await call('invitations', { projectId: projectId.value });
 });
+function bindWorkspace(id, select) {
+  if (binding.value?.workspaceId === id) return;
+  if (Object.keys(binding.value?.branches || {}).length && !window.confirm('更换项目仓库将清除本机的任务分支关联。继续吗？')) {
+    select.value = binding.value.workspaceId;
+    return;
+  }
+  const project = projectId.value;
+  return run(async () => {
+    try { await props.bindGit(project, id || null); }
+    finally { select.value = binding.value?.workspaceId || ''; }
+  });
+}
 const revoke = invitationId => run(async () => {
   await call('revoke', { projectId: projectId.value, invitationId });
   if (issued.value?.id === invitationId) issued.value = null;
@@ -146,9 +162,16 @@ onMounted(() => { if (props.user) run(() => refresh()); });
         </section>
         <section v-if="active" class="panel project-detail">
           <div class="project-title"><h2>{{ active.name }}</h2><span class="badge">{{ roleLabel(active.role) }}</span></div>
+          <div class="collab-form">
+            <label for="project-repo">本机项目仓库</label>
+            <select id="project-repo" :value="binding?.workspaceId || ''" :disabled="busy" @change="bindWorkspace($event.target.value, $event.target)">
+              <option value="">尚未绑定</option><option v-for="item in workspaces" :key="item.id" :value="item.id">{{ item.name }} — {{ item.root }}</option>
+            </select>
+            <p v-if="!workspaces.length" class="hint">请先在当前账号的本地工作区克隆或导入仓库。</p>
+          </div>
           <h3>项目成员</h3>
           <ul class="member-list">
-            <li v-for="member in members" :key="member.id"><span>{{ member.displayName }} <small>@{{ member.username }}</small></span><span>{{ roleLabel(member.role) }}</span></li>
+            <li v-for="member in members" :key="member.id"><span>{{ member.displayName }} <small>@{{ member.username }}</small></span><span>{{ roleLabel(member.role) }}</span><button v-if="active.role==='OWNER' && member.role!=='OWNER'" :disabled="busy" @click="run(async()=>{const reason=window.prompt('移除成员原因（先处理其未完成任务）');if(!reason?.trim())return;await call('removeMember',{projectId:active.id,memberId:member.id,reason});await refresh();})">移除</button></li>
           </ul>
           <p v-if="!members.length && !busy">尚未取得成员列表，可点击刷新。</p>
           <template v-if="active.role === 'OWNER'">
@@ -172,10 +195,10 @@ onMounted(() => { if (props.user) run(() => refresh()); });
               </li>
             </ul>
           </template>
-          <p class="task-placeholder">0.2 支持账号和项目成员。任务看板将在 0.3 加入。</p>
         </section>
         <section v-else class="panel"><p>创建、加入或选择一个项目后，即可查看成员。</p></section>
       </div>
+      <Tasks v-if="active" :key="active.id" :project="active" :user="user" :members="members" :api="api" :scope="scope" :workspace="boundWorkspace" :branches="binding?.branches" :bind-git="bindGit" @pending="value=>{busy=value;emit('pending',value)}" @expired="async()=>{clearProjects();await syncSession()}" />
     </template>
   </div>
 </template>

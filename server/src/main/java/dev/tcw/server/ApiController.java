@@ -42,7 +42,7 @@ class ApiController {
     @GetMapping("/health")
     Map<String, String> health() {
         jdbc.queryForObject("SELECT 1", Integer.class);
-        return Map.of("service", "tcw-server", "version", "0.2.0", "status", "ready");
+        return Map.of("service", "tcw-server", "version", "0.3.0", "status", "ready");
     }
 
     @PostMapping("/auth/register")

@@ -8,7 +8,10 @@ async function exerciseProjects() {
       if (error) throw new Error(step + ': ' + error.textContent);
       await new Promise(resolve => setTimeout(resolve, 50));
     }
-    throw new Error('Desktop smoke timed out: ' + step);
+    const detail = document.querySelector('.task-detail');
+    const status = detail?.querySelector('.badge')?.textContent;
+    const buttons = [...(detail?.querySelectorAll('button') || [])].map(button => button.textContent.trim() + (button.disabled ? ' [disabled]' : ''));
+    throw new Error('Desktop smoke timed out: ' + step + ' ' + JSON.stringify({ status, buttons }));
   };
   const set = (selector, value) => {
     const input = document.querySelector(selector);
@@ -19,12 +22,20 @@ async function exerciseProjects() {
   const press = (selector, text) => {
     const button = [...document.querySelectorAll(selector)].find(item => item.textContent.trim() === text);
     if (!button) throw new Error('Missing button ' + text);
+    if (button.disabled) throw new Error('Disabled button ' + text);
     button.click();
   };
   const suffix = crypto.randomUUID().slice(0, 12);
   const pass = crypto.randomUUID();
   const offline = (await window.tcw.bootstrap()).data;
   const projectName = '课程协作演示 ' + suffix.slice(0, 4);
+  const login = async (username, display) => {
+    set('#account-name', username); set('#account-password', pass);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    press('.login-panel button','登录');
+    await wait(() => document.querySelector('.identity-line')?.textContent.includes(display)
+      && !document.querySelector('.identity-line button')?.disabled, 'login');
+  };
   const registerLogin = async (username, display) => {
     press('.login-panel button', '注册账号');
     await wait(() => document.querySelector('#display-name'), 'register form');
@@ -32,11 +43,7 @@ async function exerciseProjects() {
     await new Promise(resolve => setTimeout(resolve, 20));
     press('.login-panel button','创建账号');
     await wait(() => document.querySelector('.collab .success')?.textContent.includes('账号已创建'), 'register');
-    set('#account-password', pass);
-    await new Promise(resolve => setTimeout(resolve, 20));
-    press('.login-panel button','登录');
-    await wait(() => document.querySelector('.identity-line')?.textContent.includes(display)
-      && !document.querySelector('.identity-line button')?.disabled, 'login');
+    await login(username, display);
   };
   press('.sidebar .nav','◷ 协作项目');
   await wait(() => document.querySelector('.login-panel'), 'login form');
@@ -77,13 +84,73 @@ async function exerciseProjects() {
       && document.querySelector('.project-detail .member-list')?.textContent.includes('联调组员')
       && !document.querySelector('.identity-line button')?.disabled, 'join and list roster');
   if (document.querySelector('#invite-hours')) throw new Error('Member can see owner invitation controls');
-  return { accountScope: true, ownerCreated: true, projectSwitch: true, memberJoined: true };
+  const reviewer = (await window.tcw.bootstrap()).data.user;
+  press('.page-heading button','退出登录');
+  await wait(() => document.querySelector('.login-panel'), 'logout member');
+  await login('desktop_a_' + suffix, '联调组长');
+  const projectChoice = () => [...document.querySelectorAll('.project-choice')].find(button => button.firstElementChild.textContent === projectName);
+  await wait(() => projectChoice() && !projectChoice().disabled, 'project list');
+  if (!projectChoice().classList.contains('current-project')) projectChoice().click();
+  window.confirm=()=>true;
+  await wait(() => document.querySelector('.project-title h2')?.textContent===projectName && !document.querySelector('.identity-line button')?.disabled, 'owner project');
+  press('.sidebar .nav','▦ 本地工作区');
+  await wait(() => document.querySelector('#clone-url'), 'signed-in local workspace');
+  press('.page-heading button','＋ 导入 Git 仓库');
+  await wait(() => document.querySelector('.workspace-bar select')?.options.length===2 && !document.querySelector('.workspace-bar select').disabled, 'import into signed-in workspace');
+  press('.sidebar .nav','◷ 协作项目');
+  await wait(() => projectChoice() && !projectChoice().disabled, 'open project again');
+  if (!projectChoice().classList.contains('current-project')) projectChoice().click();
+  await wait(() => document.querySelector('.project-title h2')?.textContent===projectName
+    && document.querySelector('#project-repo')?.options.length===2 && !document.querySelector('#project-repo').disabled, 'project repository selector');
+  const projectRepo=document.querySelector('#project-repo');
+  projectRepo.value=projectRepo.options[1].value;
+  projectRepo.dispatchEvent(new Event('change',{bubbles:true}));
+  await wait(() => projectRepo.value && !projectRepo.disabled, 'bind project repository');
+  const taskReady = status => document.querySelector('.task-detail .badge')?.textContent===status && !document.querySelector('.task-area .task-heading button').disabled;
+  const taskButton = label => [...document.querySelectorAll('.task-detail button')].find(button => button.textContent.trim() === label);
+  await wait(()=>document.querySelector('.project-title h2')?.textContent===projectName
+    && document.querySelector('.project-detail .member-list')?.textContent.includes('联调组员')
+    && document.querySelector('.task-create button') && !document.querySelector('.task-create button').disabled,'task board and roster');
+  set('#task-title','0.4 桌面验收闭环');
+  const selectAssignee=document.querySelector('.task-fields select');
+  if (![...selectAssignee.options].some(option => option.value===signedIn.user.id)) throw new Error('Owner missing from the assignee list');
+  selectAssignee.value=signedIn.user.id;selectAssignee.dispatchEvent(new Event('change',{bubbles:true}));
+  await new Promise(resolve=>setTimeout(resolve,30));
+  press('.task-create button','发布任务');
+  await wait(()=>taskReady('已指派'),'publish task');
+  await wait(()=>taskButton('从当前提交创建任务分支') && !taskButton('从当前提交创建任务分支').disabled,'task Git controls');
+  press('.task-detail button','从当前提交创建任务分支');
+  await wait(()=>taskReady('已指派') && taskButton('开始工作') && !taskButton('开始工作').disabled
+    && taskButton('切换到任务分支')?.disabled && document.querySelector('.task-git .hint')?.textContent.includes('当前 task/'),'create and associate task branch');
+  press('.task-detail button','开始工作');
+  await wait(()=>taskReady('进行中'),'start task');
+  set('#task-operation-text','已完成界面和接口验证');
+  await new Promise(resolve=>setTimeout(resolve,30));
+  press('.task-detail button','提交验收');
+  await wait(()=>taskReady('待验收') && taskButton('委派复核'),'submit task');
+  const reviewerSelect=document.querySelector('.task-detail select');
+  const options=[...reviewerSelect.options].map(option=>option.value).filter(Boolean);
+  if (options.length!==1 || options[0]!==reviewer.id) throw new Error('Invalid reviewer choices');
+  reviewerSelect.value=reviewer.id;reviewerSelect.dispatchEvent(new Event('change',{bubbles:true}));
+  await wait(()=>!taskButton('委派复核').disabled,'enable delegation');
+  press('.task-detail button','委派复核');
+  await wait(()=>taskReady('待验收') && taskButton('撤回复核委派'),'delegate review');
+  set('#task-operation-text','尝试提前退回');
+  await new Promise(resolve=>setTimeout(resolve,30));
+  if (taskButton('委派复核') || !taskButton('验收通过').disabled || !taskButton('退回').disabled) throw new Error('Waiting for opinion did not lock the decision');
+  press('.task-detail button','撤回复核委派');
+  await wait(()=>taskReady('待验收') && taskButton('验收通过') && !taskButton('验收通过').disabled,'revoke and unlock');
+  press('.task-detail button','验收通过');
+  await wait(()=>taskReady('已完成'),'accept task');
+  return { accountScope: true, ownerCreated: true, projectSwitch: true, memberJoined: true, taskLifecycle:true, reviewDelegation:true, taskBranch:true };
 }
 
 async function runProjectSmoke(window) {
   const result = await window.webContents.executeJavaScript('(' + exerciseProjects.toString() + ')()');
   await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
   await fs.writeFile('test-results/collaboration.png', (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`document.querySelector('.task-area').scrollIntoView({block:'start'});new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`);
+  await fs.writeFile('test-results/tasks.png', (await window.webContents.capturePage()).toPNG());
   return result;
 }
 

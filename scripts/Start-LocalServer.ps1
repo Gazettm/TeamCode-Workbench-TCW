@@ -1,4 +1,4 @@
-﻿# Start one isolated MySQL instance and the 0.2 API on loopback.
+﻿# Start one isolated MySQL instance and the 0.3 API on loopback.
 [CmdletBinding()]
 param(
     [ValidatePattern('^[a-zA-Z0-9_-]{1,32}$')][string]$Instance = 'dev',
@@ -28,7 +28,7 @@ if ($Stop) {
 }
 if (-not $JavaExe) { $JavaExe = (Get-Command java.exe -ErrorAction Stop).Source }
 if (-not $MysqlBin) { $MysqlBin = Split-Path -Parent (Get-Command mysqld.exe -ErrorAction Stop).Source }
-if (-not $JarPath) { $JarPath = Join-Path $repo 'server\target\tcw-server-0.2.0.jar' }
+if (-not $JarPath) { $JarPath = Join-Path $repo 'server\target\tcw-server-0.3.0.jar' }
 $JarPath = (Resolve-Path -LiteralPath $JarPath -ErrorAction Stop).Path
 $mysqlExe = Join-Path $MysqlBin 'mysql.exe'
 $mysqlAdmin = Join-Path $MysqlBin 'mysqladmin.exe'

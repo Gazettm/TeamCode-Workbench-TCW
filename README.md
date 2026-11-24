@@ -1,4 +1,34 @@
 # TeamCode-Workbench-TCW
+
+## 0.4 Git 协作版本
+
+本地工作区支持从 GitHub 克隆、查看差异、切换分支、选择文件提交、获取远程状态、推送和快进更新。在「设置」选择仓库，填写仓库级 Git 姓名和邮箱。私有仓库访问由本机 Git 凭据或 SSH 配置处理。
+
+在「协作项目」绑定本机仓库后，任务负责人可创建或关联任务分支。提交验收前会检查该分支的本地改动和最近获取的推送状态。协作服务继续使用 0.3.0。
+
+Windows 免安装版位于 release/0.4.1/TCW-win32-x64/TCW.exe。0.4.1 增加改动文件全选、中文状态和提交条件提示。源码构建和本机启动命令见 [0.4 交接记录](docs/0.4-progress.md)。
+
+## 0.3 任务协作版本
+
+新增任务发布与指派、唯一领取、开始、提交验收、委派复核、组长通过或退回、截止显示、项目动态及受约束成员移除。保持 0.2 的账号项目和本地备注。任务和动态须手动刷新。
+
+升级前先停止原服务并备份本机数据库。在仓库根目录用 JDK 21 执行以下命令。已构建 0.3.0 JAR 时可直接运行第二行。
+
+~~~powershell
+mvn -f server/pom.xml package
+.\scripts\Start-LocalServer.ps1
+~~~
+
+在 PowerShell 输入启动命令来运行脚本文件。逐行粘贴脚本正文会使 $PSScriptRoot 为空，导致启动失败。保持启动窗口打开，另开 PowerShell 可检查服务是否就绪。
+
+~~~powershell
+Invoke-RestMethod http://127.0.0.1:8080/api/health
+~~~
+
+返回 version 为 0.3.0、status 为 ready 后，可打开 release/0.3/TCW-win32-x64/TCW.exe，在客户端设置中连接 http://127.0.0.1:8080。Flyway 启动时应用 V2 迁移并保留已有账号和项目。
+
+接口见 [0.3 API](docs/0.3-api.md)，交接见 [0.3 记录](docs/0.3-progress.md)，详细说明位于工作空间 `版本文档/0.3`。Git 写操作留到 0.4；实时与未读尚未实现。
+
 Team Task &amp; Code Collaboration System
 
 ## 0.2 桌面客户端和本机协作服务

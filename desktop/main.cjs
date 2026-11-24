@@ -3,6 +3,7 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const { Store, Workbench } = require('./core.cjs');
 const { CollaborationClient } = require('./collaboration.cjs');
+const { cloneGithub, githubAddress } = require('./git.cjs');
 const smoke = process.argv.includes('--smoke');
 if (!smoke && !app.requestSingleInstanceLock()) app.exit(0);
 if (smoke) app.setPath('userData', path.join(app.getPath('temp'), `tcw-smoke-${process.pid}`));
@@ -12,6 +13,9 @@ app.whenReady().then(async () => {
   const store = new Store(dataPath);
   const collaboration = new CollaborationClient(store);
   const stores = new Map([['offline', store]]);
+  let clone;
+  let closeAfterClone = false;
+  let smokeRepository;
   function localStore(scope) {
     if (!stores.has(scope)) stores.set(scope, new Store(path.join(dataPath, 'accounts', scope)));
     return stores.get(scope);
@@ -28,9 +32,11 @@ app.whenReady().then(async () => {
     const { promisify } = require('node:util');
     const execFile = promisify(require('node:child_process').execFile);
     const fixture = path.join(app.getPath('userData'), '演示仓库');
+    smokeRepository = fixture;
     await fs.mkdir(fixture, { recursive: true });
     await execFile('git', ['init', '-b', 'main', fixture], { windowsHide: true });
     await fs.writeFile(path.join(fixture, 'README.md'), '# TCW smoke fixture');
+    await fs.writeFile(path.join(fixture, 'second.txt'), 'Another change to select');
     await workbench('offline').importDirectory(fixture);
   }
   const handle = (name, fn) => ipcMain.handle(name, async (event, ...args) => {
@@ -41,18 +47,58 @@ app.whenReady().then(async () => {
   handle('bootstrap', async () => {
     const identity = collaboration.identity();
     const local = localStore(identity.scope);
-    const { workspaces, notes } = await local.read();
+    const { workspaces, notes, gitBindings = {} } = await local.read();
     const { settings } = await store.read();
     if (identity.scope !== collaboration.identity().scope) throw new Error('登录状态已变化，请重试。');
-    return { workspaces, notes, settings, ...identity, version: app.getVersion(), dataPath: path.dirname(local.file) };
+    return { workspaces, notes, gitBindings, settings, ...identity, version: app.getVersion(), dataPath: path.dirname(local.file) };
   });
   handle('workspace:import', async scope => {
     workbench(scope);
+    if (smokeRepository) return workbench(scope).importDirectory(smokeRepository);
     const result = await dialog.showOpenDialog(window, { title: '选择已有 Git 仓库', properties: ['openDirectory'] });
     return result.canceled ? null : workbench(scope).importDirectory(result.filePaths[0]);
   });
   handle('workspace:list', (scope, id, relative) => workbench(scope).list(id, relative));
   handle('workspace:status', (scope, id) => workbench(scope).status(id));
+  handle('workspace:git', (scope, id, operation, input) => workbench(scope).git(id, operation, input, async (message, detail) => {
+    const result = smoke ? { response: 1 } : await dialog.showMessageBox(window, {
+      type: 'question', message, detail, buttons: ['取消', '确认'], defaultId: 0, cancelId: 0, noLink: true
+    });
+    workbench(scope);
+    return result.response === 1;
+  }));
+  handle('workspace:bind', (scope, projectId, workspaceId, taskId, branch) => {
+    if (scope === 'offline') throw new Error('请先登录协作账号。');
+    return workbench(scope).bind(projectId, workspaceId, taskId, branch);
+  });
+  handle('workspace:clone', async (scope, address) => {
+    workbench(scope);
+    const { name, url } = githubAddress(address);
+    if (clone) throw new Error('已有克隆操作，请先等待或取消。');
+    clone = new AbortController();
+    const timer = setTimeout(() => clone.abort(), 600000);
+    try {
+      const picked = await dialog.showOpenDialog(window, { title: '选择克隆仓库的父目录', properties: ['openDirectory'] });
+      if (picked.canceled) return null;
+      const parent = await fs.realpath(picked.filePaths[0]);
+      const result = await dialog.showMessageBox(window, { type: 'question', message: '克隆 GitHub 仓库',
+        detail: url + '\n' + path.join(parent, name), buttons: ['取消', '确认克隆'], defaultId: 0, cancelId: 0, noLink: true });
+      if (result.response === 0 || clone.signal.aborted) return null;
+      workbench(scope);
+      const directory = await cloneGithub(parent, address, clone.signal, progress => {
+        if (window && !window.isDestroyed()) window.webContents.send('workspace:clone-progress', progress);
+      });
+      return workbench(scope).importDirectory(directory);
+    } finally {
+      clearTimeout(timer);
+      clone = null;
+      if (closeAfterClone && window && !window.isDestroyed()) {
+        closeAfterClone = false;
+        window.close();
+      }
+    }
+  });
+  handle('workspace:cancel-clone', () => { clone?.abort(); });
   handle('note:save', (scope, id, relative, text) => workbench(scope).saveNote(id, relative, text));
   handle('settings:save', serverUrl => collaboration.saveAddress(serverUrl));
   handle('collaboration', (operation, input) => collaboration.run(operation, input));
@@ -61,6 +107,12 @@ app.whenReady().then(async () => {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.on('will-attach-webview', event => event.preventDefault());
+  window.on('close', event => {
+    if (!clone) return;
+    event.preventDefault();
+    closeAfterClone = true;
+    clone.abort();
+  });
   window.webContents.on('will-prevent-unload', event => {
     const choice = dialog.showMessageBoxSync(window, { type: 'question', buttons: ['继续编辑', '放弃修改并退出'], defaultId: 0, cancelId: 0, message: '个人备注尚未保存', detail: '退出会丢失本次未保存的备注修改。' });
     if (choice === 1) event.preventDefault();
@@ -100,7 +152,52 @@ app.whenReady().then(async () => {
         for(let i=0;i<100;i++){if(document.querySelector('.success')?.textContent.includes('设置已保存'))return;await new Promise(r=>setTimeout(r,50))}throw new Error('设置保存失败');
       })()`);
       if ((await store.read()).settings.serverUrl !== testService) throw new Error('设置未持久化');
+      await window.webContents.executeJavaScript(`(async()=>{
+        const wait = async (test, label) => {
+          for (let n=0;n<140;n++) {
+            if (test()) return;
+            const error=document.querySelector('.git-panel .error');
+            if(error)throw new Error(label+': '+error.textContent);
+            await new Promise(resolve=>setTimeout(resolve,50));
+          }
+          throw new Error(label+' 超时');
+        };
+        const edit=(input,value)=>{input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}))};
+        const button=(label)=>[...document.querySelectorAll('.git-panel button')].find(b=>b.textContent.trim()===label);
+        document.querySelector('.sidebar .nav').click();
+        await wait(()=>button('全选')&&!button('全选').matches(':disabled'),'加载改动列表');
+        if(document.querySelectorAll('.git-file-state[title="??"]').length!==2
+          || document.querySelector('.git-file-state[title="??"]').textContent!=='未跟踪') throw new Error('未跟踪文件标签不正确');
+        button('全选').click();
+        await wait(()=>button('提交选中的 2 个文件'),'全选');
+        if(!button('提交选中的 2 个文件').matches(':disabled') || !document.querySelector('#git-commit-hint')?.textContent.includes('Git 姓名和邮箱')) throw new Error('缺少 Git 作者提示');
+        button('取消全选').click();
+        await wait(()=>button('提交选中的 0 个文件') && !document.querySelector('.git-files input:checked'),'取消全选');
+        button('配置 Git 作者').click();
+        await wait(()=>document.querySelector('#author-name') && document.querySelector('#git-author-settings'),'加载 Git 作者');
+        edit(document.querySelector('#author-name'),'演示作者');
+        edit(document.querySelector('#author-email'),'tcw@example.test');
+        await wait(()=>button('保存 Git 作者')&&!button('保存 Git 作者').disabled,'保存 Git 作者按钮');
+        button('保存 Git 作者').click();
+        await wait(()=>document.querySelector('.git-panel .success') && !button('保存 Git 作者').disabled,'保存 Git 作者');
+        document.querySelector('.sidebar .nav').click();
+        await wait(()=>button('全选')&&!button('全选').matches(':disabled'),'加载 Git 改动');
+        button('全选').click();
+        await wait(()=>button('提交选中的 2 个文件'),'重新全选');
+        if(!button('提交选中的 2 个文件').matches(':disabled') || !document.querySelector('#git-commit-hint')?.textContent.includes('填写提交说明')) throw new Error('缺少提交说明提示');
+        edit(document.querySelector('#commit-message'),'0.4.1 桌面提交验证');
+        await wait(()=>!button('提交选中的 2 个文件').matches(':disabled'),'选择提交');
+        button('提交选中的 2 个文件').click();
+        await wait(()=>document.querySelector('.git-panel .success')?.textContent.includes('已创建'),'提交成功');
+        const branch=document.querySelector('.git-controls input');
+        edit(branch,'task/smoke');
+        await wait(()=>!button('从当前提交创建').disabled,'创建分支按钮');
+        button('从当前提交创建').click();
+        await wait(()=>document.querySelector('.git-panel strong')?.textContent==='task/smoke'
+          && !document.querySelector('.workspace-bar select')?.disabled,'切换到新分支');
+      })()`);
       evidence.checks = ['Vue 加载', 'preload 桥接', 'Node 隔离', '仓库选择与文件展示', '页面备注保存', '页面设置保存'];
+      evidence.git = { author: true, selectedCommit: true, branch: true, selectAll: true, commitHints: true, fileStatuses: true };
       evidence.fontSizes = sizes;
       if (process.env.TCW_SMOKE_SERVER_URL) {
         evidence.collaboration = await require('./project-smoke.cjs').runProjectSmoke(window);
