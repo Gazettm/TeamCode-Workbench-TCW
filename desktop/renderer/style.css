@@ -152,6 +152,22 @@ button.open-folder { flex: 0 0 33px; background: transparent; border-color: tran
 .git-ref strong { color: var(--ink); overflow-wrap: anywhere; }
 .git-remote > fieldset { margin-top: 0; }
 .git-remote > .hint { margin-top: 8px; }
+.git-more { position: relative; max-width: 100%; }
+.git-more summary {
+  list-style: none; border: 1px solid var(--line); border-radius: 7px; cursor: pointer;
+  padding: 8px 12px; font-weight: 550; background: var(--surface);
+}
+.git-more summary::-webkit-details-marker { display: none; }
+.git-more summary:hover, .git-more[open] summary { background: var(--accent-soft); border-color: #b7cef0; }
+.git-more-panel {
+  position: absolute; z-index: 3; top: calc(100% + 6px); right: 0; width: min(310px, calc(100vw - 105px));
+  display: grid; gap: 8px; padding: 11px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface); box-shadow: 0 8px 23px #16294126;
+}
+.git-more-panel > button { text-align: left; }
+.git-more-panel .git-delete-form { margin: 0; padding: 9px 0 0; border-top: 1px solid var(--line); }
+.git-delete-form button.danger { color: #9b302a; border-color: #edcac6; }
+.git-delete-form button.danger:hover:not(:disabled) { background: #fff0ee; border-color: #dcada8; }
 .branch-tools { margin-top: 10px; }
 .branch-tools summary { width: fit-content; cursor: pointer; color: #245598; font-weight: 600; }
 .git-controls, .git-controls > div { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }

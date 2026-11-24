@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
+const exec = require('node:util').promisify(require('node:child_process').execFile);
 const { Store, Workbench } = require('./core.cjs');
 const { CollaborationClient } = require('./collaboration.cjs');
 const { cloneGithub, githubAddress } = require('./git.cjs');
@@ -29,12 +30,10 @@ app.whenReady().then(async () => {
     return new Workbench(localStore(scope));
   }
   if (smoke) {
-    const { promisify } = require('node:util');
-    const execFile = promisify(require('node:child_process').execFile);
     const fixture = path.join(app.getPath('userData'), '演示仓库');
     smokeRepository = fixture;
     await fs.mkdir(fixture, { recursive: true });
-    await execFile('git', ['init', '-b', 'main', fixture], { windowsHide: true });
+    await exec('git', ['init', '-b', 'main', fixture], { windowsHide: true });
     await fs.writeFile(path.join(fixture, 'README.md'), '# TCW smoke fixture');
     await fs.writeFile(path.join(fixture, 'second.txt'), 'Another change to select');
     await workbench('offline').importDirectory(fixture);
@@ -160,7 +159,7 @@ app.whenReady().then(async () => {
             throw new Error('页面布局超出窗口 ' + name + ' ' + size + ' ' + JSON.stringify(metrics));
           }
           layouts[name][size] = metrics;
-          await fs.writeFile('test-results/042-' + name + '-' + size + '.png', (await window.webContents.capturePage()).toPNG());
+          await fs.writeFile('test-results/' + app.getVersion().replaceAll('.', '') + '-' + name + '-' + size + '.png', (await window.webContents.capturePage()).toPNG());
         }
         window.setContentSize(1280, 800);
       }
@@ -227,7 +226,7 @@ app.whenReady().then(async () => {
         button('全选').click();
         await wait(()=>button('提交选中的 2 个文件'),'重新全选');
         if(!button('提交选中的 2 个文件').matches(':disabled') || !document.querySelector('#git-commit-hint')?.textContent.includes('填写提交说明')) throw new Error('缺少提交说明提示');
-        edit(document.querySelector('#commit-message'),'0.4.2 桌面提交验证');
+        edit(document.querySelector('#commit-message'),'桌面提交验证');
         await wait(()=>!button('提交选中的 2 个文件').matches(':disabled'),'选择提交');
         button('提交选中的 2 个文件').click();
         await wait(()=>document.querySelector('.git-panel .success')?.textContent.includes('已创建'),'提交成功');
@@ -239,8 +238,89 @@ app.whenReady().then(async () => {
         await wait(()=>document.querySelector('#git-current-branch')?.textContent==='task/smoke'
           && !document.querySelector('.workspace-bar select')?.disabled,'切换到新分支');
       })()`);
+      const fixtureGit = (...args) => exec('git', ['-C', smokeRepository, ...args], { windowsHide: true });
+      const remote = path.join(dataPath, 'smoke-remote.git');
+      const peer = path.join(dataPath, 'smoke-peer');
+      await exec('git', ['init', '--bare', '-b', 'main', remote], { windowsHide: true });
+      await fixtureGit('remote', 'add', 'origin', remote);
+      await fixtureGit('push', 'origin', 'HEAD:refs/heads/main');
+      await fixtureGit('branch', '--set-upstream-to=origin/main', 'task/smoke');
+      await fixtureGit('branch', 'test/delete-after-merge');
+      await exec('git', ['clone', remote, peer], { windowsHide: true });
+      await fs.writeFile(path.join(peer, 'remote.txt'), 'Changes from remote');
+      await exec('git', ['-C', peer, 'add', 'remote.txt'], { windowsHide: true });
+      await exec('git', ['-C', peer, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-m', 'remote change'], { windowsHide: true });
+      await exec('git', ['-C', peer, 'push'], { windowsHide: true });
+      await fs.writeFile(path.join(smokeRepository, 'local.txt'), 'Changes from diverged local branch');
+      await fixtureGit('add', 'local.txt');
+      await fixtureGit('commit', '-m', 'diverged local change');
+      const original = (await fixtureGit('rev-parse', 'HEAD')).stdout.trim();
+      await fixtureGit('branch', 'test/delete-unmerged');
+      await window.webContents.executeJavaScript(`(async()=>{
+        const refresh=[...document.querySelectorAll('.git-remote button')].find(button=>button.textContent.trim()==='刷新 Git 状态');
+        refresh.click();
+        for(let n=0;n<140;n++){
+          const target=document.querySelector('#git-align-remote');
+          if(target&&!target.disabled){document.querySelector('.git-more summary').click();return}
+          await new Promise(resolve=>setTimeout(resolve,50));
+        }
+        throw new Error('Git 更多菜单未读取上游');
+      })()`);
+      await captureLayout('git-more', '.git-more-panel');
+      await window.webContents.executeJavaScript(`(async()=>{
+        const wait=async (test,label,allowError=false)=>{
+          for(let n=0;n<140;n++){
+            if(test())return;
+            const error=document.querySelector('.git-panel .error');
+            if(error&&!allowError)throw new Error(label+': '+error.textContent);
+            await new Promise(resolve=>setTimeout(resolve,50));
+          }
+          throw new Error(label+' 超时');
+        };
+        document.querySelector('#git-align-remote').click();
+        await wait(()=>document.querySelector('.git-panel .success')?.textContent.includes('已对齐到远程分支')
+          && !document.querySelector('.workspace-bar select')?.disabled,'对齐远程');
+        document.querySelector('.git-more summary').click();
+        document.querySelector('#git-show-delete').click();
+        await wait(()=>document.querySelector('#git-branch-to-delete'),'选择要删除的分支');
+        const picker=document.querySelector('#git-branch-to-delete');
+        if([...picker.options].some(option=>option.value==='task/smoke'))throw new Error('当前分支出现在删除列表');
+        picker.value='test/delete-after-merge';
+        picker.dispatchEvent(new Event('change',{bubbles:true}));
+        const button=document.querySelector('.git-delete-form button');
+        await wait(()=>!button.disabled,'继续删除');
+        button.click();
+        await wait(()=>document.querySelector('.git-panel .success')?.textContent.includes('已删除本地分支')
+          && !document.querySelector('.workspace-bar select')?.disabled,'删除本地分支');
+        const selectUnmerged = async () => {
+          document.querySelector('.git-more summary').click();
+          document.querySelector('#git-show-delete').click();
+          await wait(()=>document.querySelector('#git-branch-to-delete'),'选择尚未合并的分支',true);
+          const select=document.querySelector('#git-branch-to-delete');
+          select.value='test/delete-unmerged';
+          select.dispatchEvent(new Event('change',{bubbles:true}));
+        };
+        await selectUnmerged();
+        const ordinary=document.querySelector('.git-delete-form button[type="submit"]');
+        await wait(()=>!ordinary.disabled,'普通删除可用');
+        ordinary.click();
+        await wait(()=>document.querySelector('.git-panel .error')?.textContent.includes('尚未合并'),'普通删除保护');
+        await selectUnmerged();
+        const force=document.querySelector('.git-delete-form button.danger');
+        await wait(()=>!force.disabled,'强制删除可用',true);
+        force.click();
+        await wait(()=>!document.querySelector('.git-panel .error'),'清除上一次普通删除提示',true);
+        await wait(()=>document.querySelector('.git-panel .success')?.textContent.includes('已强制删除本地分支')
+          && !document.querySelector('.workspace-bar select')?.disabled,'强制删除本地分支');
+      })()`);
+      const after = await fixtureGit('for-each-ref', '--format=%(refname:short) %(objectname)', 'refs/heads/');
+      if (!after.stdout.split(/\r?\n/).some(line => line.startsWith('tcw-backup-') && line.endsWith(original)) ||
+          after.stdout.includes('test/delete-after-merge') || after.stdout.includes('test/delete-unmerged') ||
+          (await fixtureGit('rev-list', '--left-right', '--count', 'HEAD...origin/main')).stdout.trim() !== '0\t0') {
+        throw new Error('Git 对齐或删除操作结果未通过验证');
+      }
       evidence.checks = ['Vue 加载', 'preload 桥接', 'Node 隔离', '仓库选择与文件展示', '页面备注保存', '页面设置保存'];
-      evidence.git = { author: true, selectedCommit: true, branch: true, selectAll: true, commitHints: true, fileStatuses: true };
+      evidence.git = { author: true, selectedCommit: true, branch: true, selectAll: true, commitHints: true, fileStatuses: true, align: true, deleteBranch: true, forceDeleteBranch: true };
       evidence.fontSizes = sizes;
       if (process.env.TCW_SMOKE_SERVER_URL) {
         evidence.collaboration = await require('./project-smoke.cjs').runProjectSmoke(window);

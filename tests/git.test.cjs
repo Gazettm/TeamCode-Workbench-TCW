@@ -118,6 +118,97 @@ test('克隆使用临时目录，成功后导入目标，拒绝覆盖并可取�
   assert.deepEqual((await fs.readdir(dir)).sort(), ['fixture', 'gitconfig', 'workbench']);
 });
 
+test('对齐分叉会备份原提交和保留无关改动，删除只处理可安全删除的本地分支', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tcw-align-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 3 }));
+  git(dir, 'init', '--bare', '-b', 'main', 'remote.git');
+  git(dir, 'clone', 'remote.git', 'work');
+  const root = await fs.realpath(path.join(dir, 'work'));
+  const file = (name, content) => fs.writeFile(path.join(root, name), content);
+  const commit = (cwd, message) => git(cwd, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-m', message);
+  await file('README.md', 'base\n');
+  await file('note.txt', 'base note\n');
+  git(root, 'add', '.');
+  commit(root, 'base');
+  git(root, 'push', 'origin', 'main');
+  git(dir, 'clone', 'remote.git', 'peer');
+  const peer = path.join(dir, 'peer');
+
+  await file('README.md', 'local version\n');
+  git(root, 'add', 'README.md');
+  commit(root, 'original version');
+  const original = git(root, 'rev-parse', 'HEAD');
+  git(root, 'branch', 'not-yet-merged');
+  await fs.writeFile(path.join(peer, 'README.md'), 'remote version\n');
+  await fs.writeFile(path.join(peer, 'workspace.local'), 'remote settings\n');
+  git(peer, 'add', '.');
+  commit(peer, 'remote update');
+  git(peer, 'push');
+
+  const canceled = await write(root, 'align', {}, (message, detail) => {
+    assert.equal(message, '对齐到远程分支');
+    assert.match(detail, /远程 origin\/main/);
+    assert.match(detail, /本地备份分支 tcw-backup-/);
+    return false;
+  });
+  assert.deepEqual(canceled, { canceled: true });
+  assert.equal(git(root, 'rev-parse', 'HEAD'), original);
+  assert.ok(!(await read(root)).branches.some(name => name.startsWith('tcw-backup-')));
+
+  await file('note.txt', 'keep this edit\n');
+  git(root, 'add', 'note.txt');
+  await assert.rejects(write(root, 'align'), /暂存区/);
+  assert.equal(git(root, 'diff', '--cached', '--name-only'), 'note.txt');
+  git(root, 'restore', '--staged', 'note.txt');
+
+  await file('README.md', 'conflicting working copy\n');
+  await assert.rejects(write(root, 'align'), /本地文件/);
+  assert.equal(git(root, 'rev-parse', 'HEAD'), original);
+  assert.equal(await fs.readFile(path.join(root, 'README.md'), 'utf8'), 'conflicting working copy\n');
+  git(root, 'restore', 'README.md');
+
+  await fs.appendFile(path.join(root, '.git', 'info', 'exclude'), '\nworkspace.local\n');
+  await file('workspace.local', 'ignored local settings\n');
+  await assert.rejects(write(root, 'align'), /本地文件/);
+  assert.equal(await fs.readFile(path.join(root, 'workspace.local'), 'utf8'), 'ignored local settings\n');
+  await fs.rename(path.join(root, 'workspace.local'), path.join(dir, 'workspace.local'));
+
+  const aligned = await write(root, 'align');
+  assert.equal(git(root, 'rev-parse', aligned.backup), original);
+  const info = await read(root);
+  assert.deepEqual([info.ahead, info.behind], [0, 0]);
+  assert.equal(await fs.readFile(path.join(root, 'note.txt'), 'utf8'), 'keep this edit\n');
+  assert.deepEqual(await write(root, 'align'), { canceled: false, alreadyAligned: true });
+
+  await assert.rejects(write(root, 'deleteBranch', { target: 'main' }), /当前分支/);
+  await assert.rejects(write(root, 'deleteBranch', { target: 'not-yet-merged' }), /尚未合并/);
+  git(root, 'branch', 'already-merged');
+  assert.deepEqual(await write(root, 'deleteBranch', { target: 'already-merged' }, () => false), { canceled: true });
+  await write(root, 'deleteBranch', { target: 'already-merged' });
+  assert.ok(!(await read(root)).branches.includes('already-merged'));
+  assert.ok((await read(root)).branches.includes('not-yet-merged'));
+
+  const target = { target: 'not-yet-merged' };
+  await assert.rejects(write(root, 'forceDeleteBranch', { target: 'main' }), /当前分支/);
+  const canceledRemoval = await write(root, 'forceDeleteBranch', target, (title, detail) => {
+    assert.equal(title, '强制删除本地分支');
+    assert.match(detail, /not-yet-merged/);
+    assert.ok(detail.includes(original.slice(0, 12)));
+    assert.match(detail, /跳过已合并检查/);
+    return false;
+  });
+  assert.deepEqual(canceledRemoval, { canceled: true });
+  assert.ok((await read(root)).branches.includes(target.target));
+  const linked = path.join(dir, 'linked');
+  git(root, 'worktree', 'add', linked, target.target);
+  await assert.rejects(write(root, 'forceDeleteBranch', target), /工作区中使用/);
+  git(linked, 'switch', '--detach');
+  const remoteBefore = git(dir, '--git-dir=remote.git', 'show-ref');
+  await write(root, 'forceDeleteBranch', target);
+  assert.ok(!(await read(root)).branches.includes(target.target));
+  assert.equal(git(dir, '--git-dir=remote.git', 'show-ref'), remoteBefore);
+});
+
 test('克隆地址接受 GitHub HTTPS 和 SSH，拒绝凭据和非法路径', () => {
   assert.deepEqual(githubAddress('https://github.com/team/workbench/'), {
     url: 'https://github.com/team/workbench.git', name: 'workbench'
