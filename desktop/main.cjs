@@ -34,6 +34,8 @@ app.whenReady().then(async () => {
     smokeRepository = fixture;
     await fs.mkdir(fixture, { recursive: true });
     await exec('git', ['init', '-b', 'main', fixture], { windowsHide: true });
+    await exec('git', ['-C', fixture, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+      'commit', '--allow-empty', '-m', 'base'], { windowsHide: true });
     await fs.writeFile(path.join(fixture, 'README.md'), '# TCW smoke fixture');
     await fs.writeFile(path.join(fixture, 'second.txt'), 'Another change to select');
     await workbench('offline').importDirectory(fixture);
@@ -194,6 +196,8 @@ app.whenReady().then(async () => {
         throw new Error('Git 文件预览未显示');
       })()`);
       await captureLayout('git', '.git-review-layout');
+      const fixtureGit = (...args) => exec('git', ['-C', smokeRepository, ...args], { windowsHide: true });
+      const mainBeforeBranch = (await fixtureGit('rev-parse', 'refs/heads/main')).stdout.trim();
       await window.webContents.executeJavaScript(`(async()=>{
         const wait = async (test, label) => {
           for (let n=0;n<140;n++) {
@@ -228,18 +232,24 @@ app.whenReady().then(async () => {
         await wait(()=>button('提交选中的 2 个文件'),'重新全选');
         if(!button('提交选中的 2 个文件').matches(':disabled') || !document.querySelector('#git-commit-hint')?.textContent.includes('填写提交说明')) throw new Error('缺少提交说明提示');
         edit(document.querySelector('#commit-message'),'桌面提交验证');
-        await wait(()=>!button('提交选中的 2 个文件').matches(':disabled'),'选择提交');
-        button('提交选中的 2 个文件').click();
-        await wait(()=>document.querySelector('.git-panel .success')?.textContent.includes('已创建'),'提交成功');
-        document.querySelector('.branch-tools summary').click();
+        button('先创建分支').click();
         const branch=document.querySelector('.git-controls input');
+        if(document.activeElement!==branch || !document.querySelector('.branch-tools').open) throw new Error('快捷建分支未定位到输入框');
         edit(branch,'task/smoke');
-        await wait(()=>!button('创建并切换').disabled,'创建分支按钮');
+        await wait(()=>!button('创建并切换').disabled,'带着未提交改动创建分支');
         button('创建并切换').click();
         await wait(()=>document.querySelector('#git-current-branch')?.textContent==='task/smoke'
           && !document.querySelector('.workspace-bar select')?.disabled,'切换到新分支');
+        if(document.querySelector('.git-changes form .hint strong')?.textContent!=='task/smoke'
+          || document.querySelector('#commit-message').value!=='桌面提交验证') throw new Error('新分支或提交说明未保留');
+        await wait(()=>!button('提交选中的 2 个文件').matches(':disabled'),'新分支保留所选文件');
+        button('提交选中的 2 个文件').click();
+        await wait(()=>document.querySelector('.git-panel .success')?.textContent.includes('已创建'),'新分支提交成功');
       })()`);
-      const fixtureGit = (...args) => exec('git', ['-C', smokeRepository, ...args], { windowsHide: true });
+      if ((await fixtureGit('rev-parse', 'refs/heads/main')).stdout.trim() !== mainBeforeBranch ||
+          (await fixtureGit('rev-parse', 'refs/heads/task/smoke^')).stdout.trim() !== mainBeforeBranch) {
+        throw new Error('应只在新分支生成提交，本地主分支应保持原提交');
+      }
       const remote = path.join(dataPath, 'smoke-remote.git');
       const peer = path.join(dataPath, 'smoke-peer');
       await exec('git', ['init', '--bare', '-b', 'main', remote], { windowsHide: true });
@@ -351,7 +361,7 @@ app.whenReady().then(async () => {
         throw new Error('Git 对齐或删除操作结果未通过验证');
       }
       evidence.checks = ['Vue 加载', 'preload 桥接', 'Node 隔离', '仓库选择与文件展示', '页面备注保存', '页面设置保存'];
-      evidence.git = { author: true, selectedCommit: true, branch: true, selectAll: true, commitHints: true, fileStatuses: true, align: true, optionalAlignBackup: true, deleteBranch: true, forceDeleteBranch: true };
+      evidence.git = { author: true, selectedCommit: true, branch: true, branchWithEdits: true, selectAll: true, commitHints: true, fileStatuses: true, align: true, optionalAlignBackup: true, deleteBranch: true, forceDeleteBranch: true };
       evidence.fontSizes = sizes;
       if (process.env.TCW_SMOKE_SERVER_URL) {
         evidence.collaboration = await require('./project-smoke.cjs').runProjectSmoke(window);

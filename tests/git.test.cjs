@@ -13,7 +13,7 @@ const read = root => operate(root, 'read');
 const write = async (root, action, input = {}, confirm = () => true) =>
   operate(root, action, { ...await read(root), ...input }, confirm);
 
-test('选择提交、保留无关暂存，分支切换和远程更新遵守安全条件', async t => {
+test('带改动创建分支，选择提交保留无关暂存，Squash 合并后主分支可快进', async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tcw-git-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 3 }));
   await fs.mkdir(path.join(dir, 'work'));
@@ -42,8 +42,18 @@ test('选择提交、保留无关暂存，分支切换和远程更新遵守安�
   await fs.unlink(path.join(root, 'new-untracked.txt'));
 
   const mainBeforeBranch = git(root, 'rev-parse', 'refs/heads/main');
+  await file('README.md', 'chosen\n');
+  await file('other.txt', 'excluded staged change\n');
+  git(root, 'add', '--', 'other.txt');
+  await file('new file.txt', 'new text\n');
+  const changes = git(root, 'status', '--porcelain=v1');
+  assert.deepEqual(await write(root, 'createBranch', { target: 'task/sample' }, () => false), { canceled: true });
+  assert.equal((await read(root)).branch, 'main');
+  assert.equal(git(root, 'status', '--porcelain=v1'), changes);
   await write(root, 'createBranch', { target: 'task/sample' });
   assert.equal(git(root, 'rev-parse', 'refs/heads/main'), mainBeforeBranch);
+  assert.equal((await read(root)).branch, 'task/sample');
+  assert.equal(git(root, 'status', '--porcelain=v1'), changes);
   const store = new Store(path.join(dir, 'settings'));
   const workbench = new Workbench(store);
   const workspace = await workbench.importDirectory(root);
@@ -51,12 +61,6 @@ test('选择提交、保留无关暂存，分支切换和远程更新遵守安�
   await workbench.bind(project, workspace.id, null, null);
   await workbench.bind(project, workspace.id, task, 'task/sample');
   assert.equal((await store.read()).gitBindings[project].branches[task], 'task/sample');
-  assert.deepEqual(await write(root, 'switch', { target: 'main' }, () => false), { canceled: true });
-  assert.equal((await read(root)).branch, 'task/sample');
-  await file('README.md', 'chosen\n');
-  await file('other.txt', 'excluded staged change\n');
-  git(root, 'add', '--', 'other.txt');
-  await file('new file.txt', 'new text\n');
   assert.match(await operate(root, 'diff', { path: 'README.md' }), /chosen/);
   assert.match(await operate(root, 'diff', { path: 'new file.txt' }), /new text/);
   await assert.rejects(write(root, 'switch', { target: 'main' }), /未提交/);
@@ -68,6 +72,8 @@ test('选择提交、保留无关暂存，分支切换和远程更新遵守安�
   assert.equal(git(dir, '--git-dir=remote.git', 'rev-parse', 'refs/heads/task/sample'), (await read(root)).head);
 
   await write(root, 'commit', { message: 'finish selected changes', paths: ['other.txt'] });
+  assert.deepEqual(await write(root, 'switch', { target: 'main' }, () => false), { canceled: true });
+  assert.equal((await read(root)).branch, 'task/sample');
   await write(root, 'switch', { target: 'main' });
   assert.equal(git(root, 'rev-parse', 'HEAD'), mainBeforeBranch);
   git(dir, 'clone', 'remote.git', 'peer');

@@ -5,6 +5,7 @@ const props = defineProps({ workspace: Object, scope: String, api: Function, aut
 const emit = defineEmits(['pending', 'changed', 'configure-author']);
 const info = ref(null), error = ref(''), message = ref(''), busy = ref(false);
 const authorName = ref(''), email = ref(''), branch = ref(''), newBranch = ref('');
+const branchTools = ref(null), newBranchInput = ref(null);
 const files = ref([]), summary = ref(''), preview = ref(null);
 const moreTools = ref(null), chooseDeletion = ref(false), branchToDelete = ref('');
 const keepAlignBackup = ref(false);
@@ -19,6 +20,7 @@ const alignUnavailable = computed(() => {
 const previewLines = computed(() => preview.value?.text.split('\n') || []);
 const eligible = computed(() => info.value?.files.filter(file => file.selectable) || []);
 const missingAuthor = computed(() => info.value && (!info.value.author.name || !info.value.author.email));
+const suggestNewBranch = computed(() => info.value?.head && ['main', 'master'].includes(info.value.branch));
 const commitHint = computed(() => [
   info.value.inProgress && '请先处理仓库里的合并、变基或冲突。',
   !info.value.branch && '请切换到本地分支。',
@@ -70,12 +72,17 @@ const write = (kind, fields) => run(async () => {
   emit('changed');
   message.value = {
     push: '推送成功。', fetch: '远程状态已获取。', pull: '快进检查完成。', commit: '本地提交已创建。',
+    createBranch: '已切换到新分支 ' + info.value.branch + '。',
     align: result.alreadyAligned ? '当前分支已与上游一致。' :
       '已对齐到远程分支。' + (result.backup ? '原提交保存在 ' + result.backup + '。' : ''),
     deleteBranch: '已删除本地分支 ' + fields?.target + '。',
     forceDeleteBranch: '已强制删除本地分支 ' + fields?.target + '。'
   }[kind] || '操作已保存。';
 });
+function openNewBranch() {
+  branchTools.value.open = true;
+  newBranchInput.value.focus();
+}
 function closeMore() {
   if (!moreTools.value?.open) return;
   moreTools.value.open = false;
@@ -165,14 +172,15 @@ watch(() => props.workspace.id, () => {
         </div>
         <p v-if="info.inProgress" class="hint">仓库正在合并、变基或处理冲突，请先在终端完成。</p>
         <fieldset :disabled="busy || info.inProgress">
-        <details class="branch-tools">
+        <details ref="branchTools" class="branch-tools">
           <summary>切换或创建分支</summary>
         <div class="git-controls">
           <div><label>本地分支 <select v-model="branch"><option value="" disabled>选择分支</option><option v-for="name in info.branches" :key="name">{{ name }}</option></select></label>
             <button :disabled="!branch || branch === info.branch || info.dirty" @click="write('switch', { target: branch })">切换分支</button></div>
-          <div><label>新分支 <input v-model.trim="newBranch" maxlength="120"></label>
-            <button :disabled="!newBranch || !info.head || info.dirty" @click="write('createBranch', { target: newBranch })">创建并切换</button></div>
+          <div><label>新分支 <input ref="newBranchInput" v-model.trim="newBranch" maxlength="120"></label>
+            <button :disabled="!newBranch || !info.head" @click="write('createBranch', { target: newBranch })">创建并切换</button></div>
         </div>
+        <p v-if="info.dirty && info.head" class="hint">创建新分支会保留未提交的改动。</p>
         </details>
         </fieldset>
       </section>
@@ -206,7 +214,8 @@ watch(() => props.workspace.id, () => {
           <p v-if="info.branch" class="hint">将提交到本地分支 <strong>{{ info.branch }}</strong></p>
           <p v-if="commitHint" id="git-commit-hint" class="hint">{{ commitHint }}</p>
           <div class="button-line">
-            <button class="primary" :disabled="!!commitHint" :aria-describedby="commitHint ? 'git-commit-hint' : undefined">提交选中的 {{ files.length }} 个文件</button>
+            <button v-if="suggestNewBranch" type="button" class="primary" @click="openNewBranch">先创建分支</button>
+            <button :class="{ primary: !suggestNewBranch }" :disabled="!!commitHint" :aria-describedby="commitHint ? 'git-commit-hint' : undefined">提交选中的 {{ files.length }} 个文件</button>
             <button v-if="missingAuthor" type="button" @click="emit('configure-author')">配置 Git 作者</button>
           </div>
         </form>
