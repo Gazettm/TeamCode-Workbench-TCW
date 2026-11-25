@@ -1,7 +1,8 @@
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, inject, onMounted, watch } from 'vue';
 const props=defineProps({project:Object,user:Object,members:Array,api:Function,scope:String,workspace:Object,branches:Object,bindGit:Function,view:String});
 const emit=defineEmits(['pending','expired']);
+const confirmAction=inject('confirmAction');
 const tasks=ref([]), activities=ref([]), selected=ref(null), rounds=ref([]);
 const busy=ref(false), error=ref(''), message=ref('');
 const title=ref(''), description=ref(''), assignee=ref(''), due=ref('');
@@ -22,6 +23,31 @@ const canReview=computed(()=>!owner.value && !mine.value && pendingRound.value?.
 const terminal=computed(()=>['DONE','CANCELED'].includes(selected.value?.status));
 const gitInfo=ref(null), gitBranch=ref('');
 const taskBranch=computed(()=>props.branches?.[selected.value?.id]);
+const otherUpstream=computed(()=>gitInfo.value?.upstream && gitInfo.value.upstream.destination!=='refs/heads/'+taskBranch.value);
+const gitProgress=computed(()=>{
+ const info=gitInfo.value;
+ if(!props.workspace) return '在「成员与仓库」绑定本地工作区后可查看';
+ if(!taskBranch.value) return '本机尚未关联任务分支';
+ if(!info) return '暂时无法读取本机 Git 状态';
+ if(info.branch!==taskBranch.value) return '本机当前未检出任务分支';
+ if(info.inProgress) return '仓库正在合并、变基或处理冲突';
+ if(info.ahead>0 && info.behind>0) return '本地和上游分支已分叉';
+ if(info.ahead>0) return '有未推送的提交';
+ if(info.behind>0) return '本地分支落后于上游';
+ if(info.dirty) return '有未提交的改动';
+ if(info.ahead===0 && info.upstream?.destination==='refs/heads/'+taskBranch.value) return '分支已与上游一致（最近获取）';
+ return '尚未确认任务分支的远程状态';
+});
+const reviewProgress=computed(()=>{
+ const task=selected.value;
+ if(task?.status==='IN_PROGRESS' && rounds.value[0]?.decision==='RETURNED') return '组长已退回，待修改后重新提交';
+ if(task?.status==='IN_PROGRESS') return '待负责人提交验收';
+ if(task?.status==='IN_REVIEW' && waitingForOpinion.value) return '等待 '+name(pendingRound.value.reviewerId)+' 提交复核意见';
+ if(task?.status==='IN_REVIEW' && pendingRound.value?.opinion) return '复核意见已提交，待组长验收';
+ if(task?.status==='IN_REVIEW') return '待组长验收';
+ if(task?.status==='DONE') return '验收通过';
+ return labels[task?.status];
+});
 const localGit=(op,input={})=>props.api('git',props.scope,props.workspace.id,op,input);
 const call=(op,data={})=>props.api('collaborate',op,{projectId:props.project.id,...data});
 async function checkGit() {
@@ -49,13 +75,17 @@ const branchOperation=kind=>run(async()=>{
  } else {
   const info=await localGit('read');
   const target=kind==='createBranch' ? 'task/'+taskId : taskBranch.value;
-  const operation=info.branches.includes(target) ? 'switch' : kind;
-  const result=await localGit(operation,{branch:info.branch,head:info.head,target});
+  if(kind==='push' && info.branch!==target) throw new Error('请先切换到本任务关联的分支。');
+  if(kind==='push' && info.upstream && info.upstream.destination!=='refs/heads/'+target) {
+   throw new Error('此分支的上游与任务分支不同，请先核对远程配置。');
+  }
+  const operation=kind==='createBranch' && info.branches.includes(target) ? 'switch' : kind;
+  const result=await localGit(operation,{branch:info.branch,head:info.head,target,sameBranchRemote:kind==='push'});
   if(result.canceled)return;
   if(kind==='createBranch')await props.bindGit(props.project.id,workspaceId,taskId,target);
  }
  await checkGit();
- message.value='任务分支已更新。';
+ message.value=kind==='push' ? '任务分支已推送。' : '任务分支已更新。';
 });
 async function load() {
  tasks.value=await call('tasks');
@@ -84,12 +114,12 @@ const create=()=>run(async()=>{
  await load();message.value='任务已发布。';
 });
 async function action(kind) {
- if(confirmations[kind] && !window.confirm('确认执行“'+confirmations[kind]+'”？'))return;
  await run(async()=>{
+  if(confirmations[kind] && !await confirmAction(confirmations[kind], selected.value.title, kind))return;
   if(kind==='submit'){
    await checkGit();
    const warning=gitWarning();
-   if(warning && !window.confirm(warning+' 继续提交验收吗？'))return;
+   if(warning && !await confirmAction('提交验收', warning, 'submit'))return;
   }
   try{
    selected.value=await call('taskAction',{taskId:selected.value.id,version:selected.value.version,action:kind,text:text.value,memberId:member.value||null,dueAt:revisedDue.value?new Date(revisedDue.value).toISOString():null});
@@ -135,6 +165,10 @@ watch(()=>props.workspace?.id,()=>{gitBranch.value='';checkGit();});
  <section v-if="selected" class="panel task-detail">
   <div class="task-heading"><h2>{{selected.title}}</h2><span :class="['badge', 'task-state-'+selected.status]">{{labels[selected.status]}}</span></div>
   <p class="task-description">{{selected.description||'暂无说明'}}</p><p>负责人：{{name(selected.assigneeId)}} · {{format(selected.dueAt)}} <span v-if="selected.overdue" class="overdue">已逾期</span></p>
+  <dl class="task-progress">
+   <div><dt>代码进展 · 本机</dt><dd><strong v-if="taskBranch">{{ taskBranch }}</strong> {{ gitProgress }}</dd></div>
+   <div><dt>验收进展</dt><dd>{{ reviewProgress }}</dd></div>
+  </dl>
   <div class="button-line">
    <button v-if="selected.status==='OPEN'" class="primary" :disabled="busy" @click="action('claim')">领取任务</button>
    <button v-if="mine && selected.status==='ASSIGNED'" class="primary" :disabled="busy" @click="action('start')">开始工作</button>
@@ -148,9 +182,12 @@ watch(()=>props.workspace?.id,()=>{gitBranch.value='';checkGit();});
      <div v-if="gitInfo" class="git-controls">
       <label>关联已有分支 <select v-model="gitBranch" :disabled="busy"><option value="">选择分支</option><option v-for="name in gitInfo.branches" :key="name">{{ name }}</option></select></label>
       <button :disabled="busy || !gitBranch || gitBranch===taskBranch" @click="branchOperation('bind')">关联分支</button>
-      <button v-if="!taskBranch" :disabled="busy || gitInfo.dirty || !gitInfo.head" @click="branchOperation('createBranch')">从当前提交创建任务分支</button>
+      <button v-if="!taskBranch" :disabled="busy || gitInfo.inProgress || !gitInfo.head" @click="branchOperation('createBranch')">从当前提交创建任务分支</button>
       <button v-else :disabled="busy || gitInfo.dirty || gitInfo.branch===taskBranch || !gitInfo.branches.includes(taskBranch)" @click="branchOperation('switch')">切换到任务分支</button>
+      <button v-if="taskBranch && gitInfo.branch===taskBranch && (gitInfo.upstream || gitInfo.hasOrigin)" type="button"
+       :disabled="busy || gitInfo.inProgress || gitInfo.behind>0 || !!otherUpstream" @click="branchOperation('push')">推送任务分支</button>
      </div>
+     <p v-if="taskBranch && gitInfo?.branch===taskBranch && otherUpstream" class="hint">此分支的上游与任务分支不同，请在推送前核对。</p>
     </template>
     <p v-if="selected.status==='IN_PROGRESS' && gitWarning()" class="hint">{{ gitWarning() }}</p>
    </section>

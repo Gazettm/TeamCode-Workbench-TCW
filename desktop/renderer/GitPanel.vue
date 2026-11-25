@@ -1,14 +1,13 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
 
-const props = defineProps({ workspace: Object, scope: String, api: Function, authorOnly: Boolean });
+const props = defineProps({ workspace: Object, scope: String, api: Function });
 const emit = defineEmits(['pending', 'changed', 'configure-author']);
 const info = ref(null), error = ref(''), message = ref(''), busy = ref(false);
-const authorName = ref(''), email = ref(''), branch = ref(''), newBranch = ref('');
+const branch = ref(''), newBranch = ref(''), authError = ref(false);
 const branchTools = ref(null), newBranchInput = ref(null);
 const files = ref([]), summary = ref(''), preview = ref(null);
 const moreTools = ref(null), chooseDeletion = ref(false), branchToDelete = ref('');
-const keepAlignBackup = ref(false);
 const deletableBranches = computed(() => info.value?.branches.filter(name => name !== info.value.branch) || []);
 const alignUnavailable = computed(() => {
   const data = info.value;
@@ -41,8 +40,6 @@ async function load() {
   const data = await call('read');
   info.value = data;
   files.value = files.value.filter(path => data.files.some(item => item.selectable && item.path === path));
-  authorName.value = data.author.name;
-  email.value = data.author.email;
   branch.value = data.branch;
   if (preview.value && !data.files.some(item => item.path === preview.value.path)) preview.value = null;
 }
@@ -51,9 +48,10 @@ async function run(action) {
   busy.value = true;
   emit('pending', true);
   error.value = '';
+  authError.value = false;
   message.value = '';
   try { await action(); }
-  catch (e) { error.value = e.message; }
+  catch (e) { error.value = e.message; authError.value = e.code === 'GIT_AUTH'; }
   finally { busy.value = false; emit('pending', false); }
 }
 const write = (kind, fields) => run(async () => {
@@ -92,7 +90,6 @@ function runMore(kind, fields) {
   closeMore();
   chooseDeletion.value = false;
   branchToDelete.value = '';
-  if (kind === 'align') keepAlignBackup.value = false;
   return write(kind, fields);
 }
 const showDiff = file => run(async () => {
@@ -104,26 +101,13 @@ function diffLineClass(line) {
   if (line.startsWith('+') && !line.startsWith('+++ ')) return 'diff-add';
   if (line.startsWith('-') && !line.startsWith('--- ')) return 'diff-remove';
 }
-watch(() => props.workspace.id, () => {
-  keepAlignBackup.value = false;
-  return run(load);
-}, { immediate: true });
+watch(() => props.workspace.id, () => run(load), { immediate: true });
 </script>
 
 <template>
-  <section v-if="authorOnly" class="git-author-editor">
-    <p class="root-path" :title="workspace.root">{{ workspace.root }}</p>
-    <p>这两项会写入此仓库的提交记录。访问远程仓库使用本机 Git 凭据或 SSH 密钥。</p>
+  <section class="git-panel">
     <p v-if="error" class="notice error" role="alert">{{ error }}</p>
-    <p v-if="message" class="notice success" role="status">{{ message }}</p>
-    <form v-if="info" class="collab-form" @submit.prevent="write('author', { name: authorName, email })">
-      <label for="author-name">Git 姓名</label><input id="author-name" v-model.trim="authorName" maxlength="100" required>
-      <label for="author-email">Git 邮箱</label><input id="author-email" v-model.trim="email" type="email" maxlength="200" required>
-      <button class="primary" :disabled="busy">保存 Git 作者</button>
-    </form>
-  </section>
-  <section v-else class="git-panel">
-    <p v-if="error" class="notice error" role="alert">{{ error }}</p>
+    <button v-if="authError" type="button" @click="emit('configure-author')">打开 Git 与 GitHub 设置</button>
     <p v-if="message" class="notice success" role="status">{{ message }}</p>
     <div v-if="!info" class="panel empty">
       <p v-if="busy">正在读取 Git 状态…</p>
@@ -148,11 +132,7 @@ watch(() => props.workspace.id, () => {
               <summary>更多 <span aria-hidden="true">▾</span></summary>
               <div class="git-more-panel">
                 <button id="git-align-remote" :disabled="busy || !!alignUnavailable"
-                  @click="runMore('align', { keepBackup: keepAlignBackup })">对齐到远程分支</button>
-                <label class="git-align-backup">
-                  <input id="git-keep-align-backup" v-model="keepAlignBackup" type="checkbox" :disabled="busy || !!alignUnavailable">
-                  保留备份分支
-                </label>
+                  @click="runMore('align')">对齐到远程分支</button>
                 <p v-if="alignUnavailable" class="hint">{{ alignUnavailable }}</p>
                 <button id="git-show-delete" :aria-expanded="chooseDeletion" :disabled="busy || info.inProgress || !deletableBranches.length" @click="chooseDeletion = !chooseDeletion">删除本地分支</button>
                 <form v-if="chooseDeletion" class="collab-form git-delete-form" @submit.prevent="runMore('deleteBranch', { target: branchToDelete })">

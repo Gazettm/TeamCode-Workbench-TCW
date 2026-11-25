@@ -5,6 +5,13 @@ contextBridge.exposeInMainWorld('tcw', Object.freeze({
   list: (scope, id, relative) => ipcRenderer.invoke('workspace:list', scope, id, relative),
   status: (scope, id) => ipcRenderer.invoke('workspace:status', scope, id),
   git: (scope, id, operation, input = {}) => ipcRenderer.invoke('workspace:git', scope, id, operation, input),
+  gitSettings: (scope, id, operation, input = {}) => ipcRenderer.invoke('git:settings', scope, id, operation, input),
+  decideOperation: (id, confirmed, keepBackup) => ipcRenderer.invoke('operation:decision', id, confirmed, keepBackup),
+  onOperationConfirmation: callback => {
+    const listener = (_event, request) => callback(request);
+    ipcRenderer.on('operation:confirm', listener);
+    return () => ipcRenderer.removeListener('operation:confirm', listener);
+  },
   bindGit: (scope, project, workspace, task = null, branch = null) => ipcRenderer.invoke('workspace:bind', scope, project, workspace, task, branch),
   cloneWorkspace: (scope, address) => ipcRenderer.invoke('workspace:clone', scope, address),
   cancelClone: () => ipcRenderer.invoke('workspace:cancel-clone'),

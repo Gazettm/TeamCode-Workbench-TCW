@@ -1,19 +1,37 @@
 <script setup>
-import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, provide } from 'vue';
 import Projects from './Projects.vue';
 import GitPanel from './GitPanel.vue';
+import GitSettings from './GitSettings.vue';
+import OperationDialog from './OperationDialog.vue';
 const page = ref('workspace');
 const state = ref({ workspaces: [], notes: {}, gitBindings: {}, settings: { serverUrl: 'http://localhost:8080' }, scope: 'offline', user: null });
 const current = ref(null), entries = ref([]), relative = ref(''), selected = ref(null), note = ref(''), savedNote = ref('');
 const repo = ref(null), busy = ref(false), error = ref(''), message = ref(''), ready = ref(false), serverUrl = ref(''), truncated = ref(false);
 const sharedBusy = ref(false);
 const workspaceView = ref('files'), gitVisited = ref(false), showClone = ref(false);
-const gitBusy = ref(false), authorId = ref(''), cloneAddress = ref(''), cloning = ref(false), cloneProgress = ref(null);
+const gitBusy = ref(false), authorId = ref(''), cloneAddress = ref(''), cloning = ref(false), cloneProgress = ref(null), cloneAuthError = ref(false);
 const phases = { 'Enumerating objects': '列出对象', 'Counting objects': '统计对象', 'Compressing objects': '压缩对象',
   'Receiving objects': '接收对象', 'Resolving deltas': '处理差异', 'Updating files': '检出文件' };
 const authorWorkspace = computed(() => state.value.workspaces.find(item => item.id === (authorId.value || current.value)));
 const active = computed(() => state.value.workspaces.find(item => item.id === current.value));
 const changed = computed(() => note.value !== savedNote.value);
+const confirmation = ref(null);
+let resolveConfirmation;
+provide('confirmAction', (title, detail, operation = '') => {
+  if (confirmation.value) return Promise.resolve(false);
+  return new Promise(resolve => {
+    resolveConfirmation = resolve;
+    confirmation.value = { title, detail, operation };
+  });
+});
+function decide(accepted, keepBackup) {
+  const request = confirmation.value;
+  confirmation.value = null;
+  if (request?.id) return window.tcw.decideOperation(request.id, accepted, keepBackup);
+  resolveConfirmation?.(accepted);
+  resolveConfirmation = null;
+}
 const api = async (method, ...args) => {
   if (!window.tcw) throw new Error('请通过 Electron 客户端启动，此页面不支持独立浏览器操作');
   const response = await window.tcw[method](...args);
@@ -51,8 +69,7 @@ function showGit() {
   workspaceView.value = 'git';
 }
 async function openAuthorSettings() {
-  if (!active.value) return;
-  authorId.value = active.value.id;
+  if (active.value) authorId.value = active.value.id;
   switchPage('settings');
   await nextTick();
   document.getElementById('git-author-settings')?.scrollIntoView({ block: 'start' });
@@ -96,10 +113,13 @@ async function cloneWorkspace() {
   if (!allowLeave()) return;
   let imported;
   await run(async () => {
-    cloning.value = true; cloneProgress.value = null;
+    cloning.value = true; cloneProgress.value = null; cloneAuthError.value = false;
     try {
       imported = await api('cloneWorkspace', state.value.scope, cloneAddress.value);
       if (imported) { cloneAddress.value = ''; showClone.value = false; await reload(); }
+    } catch (failure) {
+      cloneAuthError.value = failure.code === 'GIT_AUTH';
+      throw failure;
     } finally { cloning.value = false; cloneProgress.value = null; }
   });
   if (imported) await switchWorkspace(imported.id);
@@ -134,17 +154,19 @@ async function saveNote() {
 async function refresh() {
   await run(async () => { repo.value = await api('status', state.value.scope, current.value); await loadDirectory(relative.value); message.value = '仓库状态已刷新'; });
 }
-let unsubscribe;
+let unsubscribe, unsubscribeConfirmation;
 onMounted(async () => {
   unsubscribe = window.tcw?.onCloneProgress(progress => { cloneProgress.value = progress; });
+  unsubscribeConfirmation = window.tcw?.onOperationConfirmation(request => { confirmation.value = request; });
   await run(reload);
   ready.value = true;
 });
-onBeforeUnmount(() => unsubscribe?.());
+onBeforeUnmount(() => { unsubscribe?.(); unsubscribeConfirmation?.(); });
 window.addEventListener('beforeunload', event => { if (changed.value) { event.preventDefault(); event.returnValue = ''; } });
 </script>
 
 <template>
+  <OperationDialog :request="confirmation" @decision="decide" />
   <div class="shell" :data-ready="ready">
     <aside class="sidebar">
       <div class="brand"><span class="logo" aria-hidden="true">T</span><span>协作工作台</span></div>
@@ -154,7 +176,7 @@ window.addEventListener('beforeunload', event => { if (changed.value) { event.pr
       </nav>
       <div class="sidebar-bottom">
         <button title="设置" :class="['nav', { active: page === 'settings' }]" :aria-current="page === 'settings' ? 'page' : undefined" @click="switchPage('settings')">⚙ <span>设置</span></button>
-        <div class="version">TCW <span>v{{ state.version || '0.4.6' }}</span></div>
+        <div class="version">TCW <span>v{{ state.version || '0.4.7' }}</span></div>
       </div>
     </aside>
     <main>
@@ -187,6 +209,7 @@ window.addEventListener('beforeunload', event => { if (changed.value) { event.pr
               <div class="button-line">
                 <input id="clone-url" v-model.trim="cloneAddress" placeholder="https://github.com/owner/repo" :disabled="busy || gitBusy" required>
                 <button :disabled="busy || gitBusy || !cloneAddress">选择目录并克隆</button>
+                <button v-if="cloneAuthError && !cloning" type="button" @click="openAuthorSettings">打开 Git 与 GitHub 设置</button>
                 <button v-if="cloning" type="button" @click="api('cancelClone')">取消克隆</button>
               </div>
               <p v-if="cloning" role="status">{{ phases[cloneProgress?.phase] || cloneProgress?.phase || '等待选择目录' }} {{ Number.isFinite(cloneProgress?.percent) ? cloneProgress.percent + '%' : '' }}</p>
@@ -252,7 +275,7 @@ window.addEventListener('beforeunload', event => { if (changed.value) { event.pr
               </form>
             </section>
             <section id="git-author-settings" class="panel settings author-settings">
-              <h2>仓库 Git 作者</h2>
+              <h2>Git 与 GitHub</h2>
               <div class="collab-form">
                 <label for="author-workspace">工作区</label>
                 <select id="author-workspace" :value="authorWorkspace?.id || ''" :disabled="gitBusy" @change="authorId = $event.target.value">
@@ -260,8 +283,7 @@ window.addEventListener('beforeunload', event => { if (changed.value) { event.pr
                   <option v-for="item in state.workspaces" :key="item.id" :value="item.id" :title="item.root">{{ item.name }}</option>
                 </select>
               </div>
-              <GitPanel v-if="authorWorkspace" :key="authorWorkspace.id" :workspace="authorWorkspace" :scope="state.scope" :api="api" author-only @pending="gitBusy = $event" />
-              <p v-else>请选择工作区，再配置此仓库的提交姓名和邮箱。</p>
+              <GitSettings :key="authorWorkspace?.id || state.scope" :workspace="authorWorkspace" :scope="state.scope" :api="api" @pending="gitBusy = $event" />
             </section>
             <section class="panel settings local-settings">
               <h2>本地数据</h2>

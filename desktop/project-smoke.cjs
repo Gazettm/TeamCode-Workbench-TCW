@@ -109,6 +109,8 @@ async function exerciseProjects() {
   await wait(() => projectChoice() && !projectChoice().disabled, 'project list');
   if (!projectChoice().classList.contains('current-project')) projectChoice().click();
   window.confirm=()=>true;
+  const confirmDialog = new MutationObserver(() => document.querySelector('dialog[open] #confirm-operation')?.click());
+  confirmDialog.observe(document.querySelector('dialog'), { attributes: true, attributeFilter: ['open'] });
   await wait(() => document.querySelector('.project-title h2')?.textContent===projectName && !document.querySelector('.identity-line button')?.disabled, 'owner project');
   press('.sidebar .nav','▦ 本地工作区');
   await wait(() => document.querySelector('.workspace-header'), 'signed-in local workspace');
@@ -145,6 +147,9 @@ async function exerciseProjects() {
     && taskButton('切换到任务分支')?.disabled && document.querySelector('.task-git .hint')?.textContent.includes('当前 task/'),'create and associate task branch');
   press('.task-detail button','开始工作');
   await wait(()=>taskReady('进行中'),'start task');
+  press('.task-detail button','推送任务分支');
+  await wait(()=>document.querySelector('.task-progress')?.textContent.includes('分支已与上游一致')
+    && document.querySelector('.task-progress')?.textContent.includes('待负责人提交验收'),'push task branch and show progress');
   set('#task-operation-text','已完成界面和接口验证');
   await new Promise(resolve=>setTimeout(resolve,30));
   press('.task-detail button','提交验收');
@@ -156,6 +161,7 @@ async function exerciseProjects() {
   await wait(()=>!taskButton('委派复核').disabled,'enable delegation');
   press('.task-detail button','委派复核');
   await wait(()=>taskReady('待验收') && taskButton('撤回复核委派'),'delegate review');
+  if (!document.querySelector('.task-progress').textContent.includes('等待 联调组员')) throw new Error('Delegated review status missing');
   set('#task-operation-text','尝试提前退回');
   await new Promise(resolve=>setTimeout(resolve,30));
   if (taskButton('委派复核') || !taskButton('验收通过').disabled || !taskButton('退回').disabled) throw new Error('Waiting for opinion did not lock the decision');
@@ -174,7 +180,8 @@ async function exerciseProjects() {
   await wait(()=>document.querySelector('.activity-list')?.textContent.includes('验收通过'),'activity view');
   await openView('tasks');
   await wait(()=>taskReady('已完成'),'return to task details');
-  return { accountScope: true, ownerCreated: true, projectSwitch: true, memberJoined: true, taskLifecycle:true, reviewDelegation:true, taskBranch:true, taskFilter:true, projectTabs:true };
+  confirmDialog.disconnect();
+  return { accountScope: true, ownerCreated: true, projectSwitch: true, memberJoined: true, taskLifecycle:true, reviewDelegation:true, taskBranch:true, taskProgress:true, taskFilter:true, projectTabs:true };
 }
 
 async function runProjectSmoke(window) {

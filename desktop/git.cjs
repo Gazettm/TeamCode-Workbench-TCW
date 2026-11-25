@@ -25,7 +25,13 @@ function gitError(error) {
   if (error.killed) return new Error('Git 操作超时，请检查连接和仓库状态后重试。');
   if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return new Error('Git 输出过大，请在终端查看完整结果。');
   if (/dubious ownership/i.test(out)) return new Error('Git 拒绝访问，请在终端确认仓库的所有者和信任设置。');
-  if (/authentication|publickey|repository not found|terminal prompts disabled|could not read (username|password)|host key verification/i.test(out)) return new Error('无法访问远程仓库，请检查仓库权限及本机 Git 凭据或 SSH 配置。');
+  if (/GH006|GH013|protected branch|changes must be made through a pull request/i.test(out)) {
+    return new Error('GitHub 分支规则拒绝了推送。请检查此分支是否要求通过 Pull Request 合并。');
+  }
+  if (/host key verification/i.test(out)) return Object.assign(new Error('无法验证 SSH 主机。请核对 GitHub 的主机指纹及本机 SSH 配置。'), { code: 'GIT_AUTH' });
+  if (/authentication|publickey|repository not found|terminal prompts disabled|could not read (username|password)|permission.*denied|requested URL returned error: (401|403)/i.test(out)) {
+    return Object.assign(new Error('无法读取或写入远程仓库。请检查仓库地址、账号权限及本机 GitHub 授权。'), { code: 'GIT_AUTH' });
+  }
   if (/non-fast-forward|fetch first|stale info|failed to push/i.test(out)) return new Error('远程拒绝推送，请获取远程状态，并检查分支是否落后或被保护。');
   if (/could not resolve|failed to connect|timed out|could not read from remote/i.test(out)) return new Error('无法连接远程仓库，请检查地址、网络和 Git 认证。');
   if (/index.lock|another git process/i.test(out)) return new Error('仓库正被其他 Git 操作占用，请等它完成后重试。');
@@ -60,6 +66,26 @@ const value = async (root, args, options) => (await git(root, args, options)).tr
 const optional = { allowExit: 1 };
 const nul = data => data.split('\0').filter(Boolean);
 
+async function authorField(root, key) {
+  const result = await git(root, ['config', '--show-scope', '--get', key], optional);
+  const end = result.indexOf('\t');
+  return end < 0 ? { value: '', scope: '' } : { value: result.slice(end + 1).trim(), scope: result.slice(0, end) };
+}
+
+function checkedAuthor(input) {
+  if (typeof input.name !== 'string' || typeof input.email !== 'string' || !input.name.trim() || input.name.length > 100 ||
+      /[\u0000-\u001f<>]/.test(input.name) || input.email.length > 200 || !/^[^\s<>@]+@[^\s<>@]+$/.test(input.email)) {
+    throw new Error('请填写有效的 Git 姓名和邮箱。');
+  }
+  return [input.name.trim(), input.email];
+}
+
+async function setAuthor(root, scope, input) {
+  const [name, email] = checkedAuthor(input);
+  await git(root, ['config', scope, '--replace-all', '--', 'user.name', name]);
+  await git(root, ['config', scope, '--replace-all', '--', 'user.email', email]);
+}
+
 async function projectRoot(root) {
   const top = await value(root, ['rev-parse', '--show-toplevel']);
   if (await fs.realpath(top) !== root) throw new Error('仓库根目录已变化，请重新导入。');
@@ -73,8 +99,8 @@ async function readGit(root) {
     git(root, ['status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all']),
     value(root, ['for-each-ref', '--format=%(refname)%09%(upstream)%09%(upstream:remotename)%09%(upstream:remoteref)', heads]),
     value(root, ['rev-parse', '--git-path', 'MERGE_HEAD', '--git-path', 'rebase-merge', '--git-path', 'rebase-apply', '--git-path', 'CHERRY_PICK_HEAD', '--git-path', 'REVERT_HEAD', '--git-path', 'sequencer']),
-    value(root, ['config', '--local', '--get', 'user.name'], optional),
-    value(root, ['config', '--local', '--get', 'user.email'], optional),
+    authorField(root, 'user.name'),
+    authorField(root, 'user.email'),
     value(root, ['remote'])
   ]);
   const branch = branchRef.startsWith(heads) ? branchRef.slice(heads.length) : '';
@@ -98,7 +124,7 @@ async function readGit(root) {
   }
   const staged = files.some(file => file.status !== '??' && file.status[0] !== ' ');
   return { branch, head, files: files.slice(0, 1000), changeCount: files.length, commitLimit, dirty: files.length > 0, staged, truncated: files.length > 1000,
-    branches, inProgress, upstream, ahead, behind, author: { name, email }, hasOrigin: origin.split(/\r?\n/).includes('origin') };
+    branches, inProgress, upstream, ahead, behind, author: { name: name.value, email: email.value }, hasOrigin: origin.split(/\r?\n/).includes('origin') };
 }
 
 async function commitExists(root, ref) {
@@ -168,6 +194,87 @@ function remoteDisplay(url) {
   return url;
 }
 
+function sshTarget(address) {
+  if (address.startsWith('ssh://')) {
+    const url = new URL(address);
+    return { host: url.hostname, port: url.port, user: url.username };
+  }
+  const scp = /^(?:([\w.-]+)@)?([\w.-]+):[^\\]/.exec(address);
+  return scp && scp[2].length > 1 ? { host: scp[2], user: scp[1] } : null;
+}
+
+async function configuredRemote(root, name) {
+  if (!/^[a-zA-Z0-9][\w./-]*$/.test(name || '')) throw new Error('请选择仓库的远程地址。');
+  const urls = (await value(root, ['remote', 'get-url', '--all', '--', name])).split(/\r?\n/);
+  if (urls.length !== 1) throw new Error('此远程配置了多个地址，请在 Git 中核对。');
+  const address = remoteDisplay(urls[0]);
+  const protocol = address.startsWith('https://') && new URL(address).hostname === 'github.com' ? 'github-https' :
+    sshTarget(address) ? 'ssh' : 'other';
+  return { name, address, protocol };
+}
+
+async function gitSettings(root, base, operation, input = {}) {
+  if (root) await projectRoot(root);
+  if (operation === 'read') {
+    const version = await value(base, ['--version']);
+    const [manager, name, email] = await Promise.all([
+      value(base, ['credential-manager', '--version']).catch(() => ''),
+      value(base, ['config', '--global', '--get', 'user.name'], optional),
+      value(base, ['config', '--global', '--get', 'user.email'], optional)
+    ]);
+    const accounts = manager ? await value(base, ['credential-manager', 'github', 'list', '--no-ui'])
+      .then(list => list.split(/\r?\n/).map(line => line.trim()).filter(line => /^[a-z\d][a-z\d-]{0,38}$/i.test(line)))
+      .catch(() => null) : null;
+    const author = root ? { name: await authorField(root, 'user.name'), email: await authorField(root, 'user.email') } : null;
+    const remotes = root ? await Promise.all((await value(root, ['remote'])).split(/\r?\n/).filter(Boolean).map(
+      remote => configuredRemote(root, remote).catch(() => ({ name: remote, address: '', protocol: '' }))
+    )) : [];
+    return { version, manager, accounts, global: { name, email }, author, remotes };
+  }
+  if (operation === 'login') {
+    await value(base, ['credential-manager', '--version']).catch(() => { throw new Error('请先安装 Git for Windows 中的 Git Credential Manager。'); });
+    await git(base, ['credential-manager', 'github', 'login', '--browser'], { timeout: 300000 })
+      .catch(() => { throw new Error('GitHub 授权未完成。请检查浏览器中的授权结果后重试。'); });
+    return;
+  }
+  if (operation === 'save-global') return locked(base, () => setAuthor(base, '--global', input));
+  if (!root) throw new Error('请先选择已导入的仓库。');
+  if (operation === 'save-local') return locked(root, () => setAuthor(root, '--local', input));
+  if (operation === 'inherit') {
+    return locked(root, async () => {
+      for (const key of ['user.name', 'user.email']) await git(root, ['config', '--local', '--unset-all', key], { allowExit: 5 });
+    });
+  }
+  if (operation !== 'test' && operation !== 'ssh-identity') throw new Error('不支持该 Git 设置操作。');
+  const remote = await configuredRemote(root, input.remote);
+  if (operation === 'test') {
+    await git(root, ['ls-remote', '--symref', '--', remote.name, 'HEAD'], {
+      timeout: 20000, env: { ...gitEnvironment(), GCM_INTERACTIVE: 'never', SSH_ASKPASS_REQUIRE: 'never' }
+    });
+    return { protocol: remote.protocol };
+  }
+  const ssh = remote.protocol === 'ssh' && sshTarget(remote.address);
+  if (!ssh || !/^[a-z\d][a-z\d._-]*$/i.test(ssh.host)) throw new Error('此远程地址无法用 OpenSSH 检测身份，请测试仓库读取权限。');
+  if (process.env.GIT_SSH || process.env.GIT_SSH_COMMAND || await value(root, ['config', '--get', 'core.sshCommand'], optional)) {
+    throw new Error('此仓库使用自定义 SSH 命令。请用「测试读取权限」按实际 Git 配置检查连接。');
+  }
+  const user = ssh.user || (['github.com', 'ssh.github.com'].includes(ssh.host.toLowerCase()) ? 'git' : null);
+  const reply = await exec('ssh', ['-T', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes', '-oConnectTimeout=8',
+    ...(ssh.port ? ['-p', ssh.port] : []), ...(user ? ['-l', user] : []), '--', ssh.host],
+  { cwd: root, windowsHide: true, timeout: 15000, maxBuffer: 32768 }).catch(error => {
+    if (error.stdout || error.stderr) return error;
+    throw new Error('无法运行 OpenSSH，请检查 SSH 是否已安装。');
+  });
+  const output = (reply.stdout || '') + '\n' + (reply.stderr || '');
+  const account = /^Hi ([a-z\d-]+)! You've successfully authenticated, but GitHub does not provide shell access\./im.exec(output)?.[1];
+  if (!account) {
+    if (/host key verification/i.test(output)) throw new Error('SSH 主机尚未通过验证，请核对 GitHub 主机指纹。');
+    if (/permission denied/i.test(output)) throw new Error('SSH 密钥未通过认证，请检查本机密钥或 GitHub 授权。');
+    throw new Error('无法确认 GitHub SSH 身份，请检查网络或 SSH 配置。');
+  }
+  return { account };
+}
+
 async function target(root, info, operation) {
   const remote = info.upstream?.remote || (info.hasOrigin && 'origin');
   if (!remote || remote === '.' || !/^[a-zA-Z0-9][\w./-]*$/.test(remote)) throw new Error('请先为当前分支配置可用的远程仓库。');
@@ -222,19 +329,20 @@ async function alignBranch(root, before, keepBackup, confirm) {
   if (fetched.upstream?.ref !== ref) throw new Error('远程目标已变化，请重新确认。');
   const targetHead = await value(root, ['rev-parse', '--verify', ref]);
   if (targetHead === before.head) return { canceled: false, alreadyAligned: true };
-  const backup = keepBackup
-    ? 'tcw-backup-' + new Date().toISOString().replace(/\D/g, '').slice(0, 14) + '-' + randomUUID().slice(0, 8)
-    : null;
   const detail = [
     root,
     '本地 ' + before.branch + ' · ' + before.head.slice(0, 12),
     '远程 ' + remote.remote + '/' + remote.ref.slice(heads.length) + ' · ' + targetHead.slice(0, 12),
     '本地分支将指向上述远程提交。',
-    backup ? '原提交将保存在本地备份分支 ' + backup + '。'
+    keepBackup ? '原提交将保存在本地备份分支 tcw-backup-…。'
       : '本次不创建备份分支。当前分支独有的提交将从这条分支的历史中移除。',
     '未暂存的改动会尽量保留，遇到有改动的同一文件会停止。'
   ].join('\n');
-  if (!await confirm(titles.align, detail)) return { canceled: true };
+  const decision = await confirm(titles.align, detail, { keepBackup });
+  if (!decision) return { canceled: true };
+  const backup = (typeof decision === 'object' ? decision.keepBackup === true : keepBackup)
+    ? 'tcw-backup-' + new Date().toISOString().replace(/\D/g, '').slice(0, 14) + '-' + randomUUID().slice(0, 8)
+    : null;
   const current = await readGit(root);
   sameHead(before, current);
   requireIdle(current);
@@ -268,11 +376,7 @@ async function operate(root, kind, input, confirm) {
     let destination;
     let deletedTip;
     if (kind === 'author') {
-      if (typeof input.name !== 'string' || typeof input.email !== 'string' || !input.name.trim() || input.name.length > 100 ||
-          /[\u0000-\u001f<>]/.test(input.name) || input.email.length > 200 || !/^[^\s<>@]+@[^\s<>@]+$/.test(input.email)) {
-        throw new Error('请填写有效的 Git 姓名和邮箱。');
-      }
-      details = [input.name.trim(), input.email];
+      details = checkedAuthor(input);
     } else if (kind === 'switch' || kind === 'createBranch' || deleting) {
       if (typeof input.target !== 'string' || !input.target || input.target.length > 240 || input.target.startsWith('-')) throw new Error('请输入有效的本地分支名。');
       await git(root, ['check-ref-format', heads + input.target]);
@@ -303,17 +407,21 @@ async function operate(root, kind, input, confirm) {
       }
       if (kind === 'push' && before.behind > 0) throw new Error('当前分支落后于已知上游，请获取远程状态并检查能否快进。');
       destination = await target(root, before, kind);
-      details = [destination.remote + ' · ' + destination.address, ...(kind !== 'fetch' ? [destination.ref] : [])];
+      if (kind === 'push' && input.sameBranchRemote === true && destination.ref !== heads + before.branch) {
+        throw new Error('此分支的上游与任务分支不同，请先核对远程配置。');
+      }
+      const remoteBranch = destination.remote + '/' + destination.ref.slice(heads.length);
+      details = [kind === 'push' ? before.branch + ' → ' + remoteBranch :
+        before.branch + ' ← ' + remoteBranch, destination.address];
     }
-    if (!await confirm(titles[kind], [root, '当前分支 ' + (before.branch || '分离 HEAD'), ...details].join('\n'))) return { canceled: true };
+    if (kind !== 'fetch' && !await confirm(titles[kind], [root, '当前分支 ' + (before.branch || '分离 HEAD'), ...details].join('\n'))) return { canceled: true };
     const current = await readGit(root);
     sameHead(before, current);
     requireIdle(current);
     if (destination && JSON.stringify(destination) !== JSON.stringify(await target(root, current, kind))) throw new Error('远程目标已变化，请重新确认。');
     switch (kind) {
       case 'author':
-        await git(root, ['config', '--local', '--replace-all', '--', 'user.name', input.name.trim()]);
-        await git(root, ['config', '--local', '--replace-all', '--', 'user.email', input.email]);
+        await setAuthor(root, '--local', input);
         break;
       case 'switch':
         if (input.target === current.branch) break;
@@ -432,4 +540,4 @@ async function cloneGithub(parent, address, signal, progress) {
   }
 }
 
-module.exports = { operate, githubAddress, cloneGithub };
+module.exports = { operate, githubAddress, cloneGithub, gitSettings };
