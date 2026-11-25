@@ -6,12 +6,49 @@ const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const { Store, Workbench } = require('../desktop/core.cjs');
 const { randomUUID } = require('node:crypto');
-const { operate, githubAddress, cloneGithub } = require('../desktop/git.cjs');
+const { operate, githubAddress, cloneGithub, gitSettings } = require('../desktop/git.cjs');
 
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true }).trim();
 const read = root => operate(root, 'read');
 const write = async (root, action, input = {}, confirm = () => true) =>
   operate(root, action, { ...await read(root), ...input }, confirm);
+
+test('Git 设置按字段继承全局身份，可覆盖、恢复继承并只读测试远程', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tcw-settings-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 3 }));
+  const previousGlobal = process.env.GIT_CONFIG_GLOBAL;
+  const previousStore = process.env.GCM_CREDENTIAL_STORE;
+  process.env.GIT_CONFIG_GLOBAL = path.join(dir, 'gitconfig');
+  process.env.GCM_CREDENTIAL_STORE = 'none';
+  t.after(() => {
+    if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = previousGlobal;
+    if (previousStore === undefined) delete process.env.GCM_CREDENTIAL_STORE;
+    else process.env.GCM_CREDENTIAL_STORE = previousStore;
+  });
+  git(dir, 'init', '-b', 'main', 'work');
+  git(dir, 'init', '--bare', '-b', 'main', 'remote.git');
+  const root = await fs.realpath(path.join(dir, 'work'));
+  const global = { name: '默认作者', email: 'global@example.test' };
+  await gitSettings(null, dir, 'save-global', global);
+  git(root, 'config', 'user.email', 'repo@example.test');
+  git(root, 'remote', 'add', 'origin', path.join(dir, 'remote.git'));
+  const state = await gitSettings(root, dir, 'read');
+  assert.deepEqual(state.author, {
+    name: { value: global.name, scope: 'global' },
+    email: { value: 'repo@example.test', scope: 'local' }
+  });
+  await gitSettings(root, dir, 'save-local', { name: '仓库作者', email: 'other@example.test' });
+  assert.equal((await read(root)).author.name, '仓库作者');
+  await gitSettings(root, dir, 'inherit');
+  await gitSettings(root, dir, 'inherit');
+  assert.deepEqual((await read(root)).author, global);
+  await fs.writeFile(path.join(root, 'example.txt'), 'change');
+  await write(root, 'commit', { message: 'Inherited author', paths: ['example.txt'] });
+  assert.equal(git(root, 'log', '-1', '--format=%ae'), global.email);
+  assert.deepEqual(await gitSettings(root, dir, 'test', { remote: 'origin' }), { protocol: 'other' });
+  assert.equal(git(root, 'for-each-ref', 'refs/remotes'), '');
+});
 
 test('带改动创建分支，选择提交保留无关暂存，Squash 合并后主分支可快进', async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tcw-git-'));
@@ -68,6 +105,10 @@ test('带改动创建分支，选择提交保留无关暂存，Squash 合并后�
   await write(root, 'commit', { message: 'only selected', paths: ['README.md', 'new file.txt'] });
   assert.deepEqual(git(root, 'show', '--format=', '--name-only', 'HEAD').split(/\r?\n/), ['README.md', 'new file.txt']);
   assert.equal(git(root, 'diff', '--cached', '--name-only'), 'other.txt');
+  git(root, 'branch', '--set-upstream-to=origin/main', 'task/sample');
+  await assert.rejects(write(root, 'push', { sameBranchRemote: true }), /上游与任务分支不同/);
+  assert.equal(git(dir, '--git-dir=remote.git', 'rev-parse', 'main'), mainBeforeBranch);
+  git(root, 'branch', '--unset-upstream', 'task/sample');
   await write(root, 'push');
   assert.equal(git(dir, '--git-dir=remote.git', 'rev-parse', 'refs/heads/task/sample'), (await read(root)).head);
 

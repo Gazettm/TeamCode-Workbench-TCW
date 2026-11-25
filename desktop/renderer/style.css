@@ -166,6 +166,26 @@ button.open-folder { flex: 0 0 33px; background: transparent; border-color: tran
 }
 .git-more-panel > button { text-align: left; }
 .git-align-backup { display: flex; align-items: center; gap: 7px; }
+.git-settings-group { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.git-settings-group summary { cursor: pointer; font-weight: 650; }
+.git-settings-group h3 { margin: 0 0 8px; }
+.operation-dialog {
+  color: var(--ink, #1b2c46); background: var(--surface); border: 1px solid var(--line);
+  border-radius: 14px; padding: 24px; width: min(530px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px); overflow: auto; box-shadow: 0 16px 48px #15274538;
+}
+.operation-dialog::backdrop { background: #17284270; }
+.operation-dialog h2 { margin-top: 0; }
+.operation-context { padding: 10px 14px; background: var(--accent-soft); margin: 12px 0; border-radius: 8px; max-height: 40vh; overflow: auto; }
+.operation-context p { margin: 5px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.operation-path { color: var(--muted); font-size: 13px; }
+.operation-actions { justify-content: flex-end; margin-top: 16px; }
+.operation-actions .danger-primary { background: #a6302a; border-color: #a6302a; color: white; }
+.operation-actions .danger-primary:hover { background: #872520; }
+.task-progress { display: grid; gap: 8px; padding: 12px; margin: 12px 0; background: var(--accent-soft); border-radius: 8px; }
+.task-progress > div { display: grid; grid-template-columns: 108px 1fr; gap: 8px; }
+.task-progress dt { color: var(--muted); }
+.task-progress dd { margin: 0; overflow-wrap: anywhere; }
 .git-more-panel .git-delete-form { margin: 0; padding: 9px 0 0; border-top: 1px solid var(--line); }
 .git-delete-form button.danger { color: #9b302a; border-color: #edcac6; }
 .git-delete-form button.danger:hover:not(:disabled) { background: #fff0ee; border-color: #dcada8; }
@@ -203,7 +223,7 @@ button.diff-choice { align-items: center; display: flex; gap: 6px; justify-conte
 
 .settings-layout {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-areas: "service author" "data author"; align-items: start; gap: 14px;
+  grid-template-areas: "service author" "data author"; grid-template-rows: max-content 1fr; align-items: start; gap: 14px;
 }
 .settings { display: flex; flex-direction: column; gap: 8px; scroll-margin-top: 70px; }
 .settings .collab-form { margin: 0; }
@@ -212,7 +232,6 @@ button.diff-choice { align-items: center; display: flex; gap: 6px; justify-conte
 .service-settings { grid-area: service; }
 .author-settings { grid-area: author; }
 .local-settings { grid-area: data; }
-.git-author-editor { display: grid; gap: 7px; min-width: 0; }
 
 @media (max-width: 1090px) {
   :root { --rail: 66px; }
@@ -232,7 +251,7 @@ button.diff-choice { align-items: center; display: flex; gap: 6px; justify-conte
   .explorer, .git-review-layout, .settings-layout { grid-template-columns: minmax(0, 1fr); }
   .explorer { height: auto; }
   .note-editor textarea { min-height: 145px; }
-  .settings-layout { grid-template-areas: "service" "author" "data"; }
+  .settings-layout { grid-template-areas: "service" "author" "data"; grid-template-rows: auto; }
   .file-pane { border-right: 0; border-bottom: 1px solid var(--line); }
   .file-list { height: min(37vh, 350px); }
   .repository-meta .root-path { flex-basis: 100%; }
